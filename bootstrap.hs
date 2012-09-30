@@ -4,7 +4,7 @@ import Data.Char
 import Data.List
 import Data.Maybe
 import Data.Array
-import GHC.Prim
+import Unsafe.Coerce
 import qualified Data.Map as Map
 
  -- utility
@@ -233,7 +233,7 @@ astize pt = op_trans (td_op (head (token_tds (pt_token pt)))) pt
 
 astt_id (PT id []) = AST_ID$ token_src id
 astt_id bad = error$ "astt_id called on weird PT: " ++ show bad
-astt_num (PT num []) = AST_Lit (Thing Type_Int (unsafeCoerce# (read (token_src num) :: Int)))
+astt_num (PT num []) = AST_Lit (Thing Type_Int (unsafeCoerce (read (token_src num) :: Int)))
 astt_num bad = error$ "astt_num called on weird PT: " ++ show bad
 astt_bind (PT tok [rval, lval]) = desugar (astize lval) (astize rval) where
     desugar (AST_ID name) def = AST_Bind name def
@@ -281,10 +281,10 @@ ast_resolve nses other = other
 
 data Unknown
 data Thing = Thing Type Unknown
-unk = unsafeCoerce# 0 :: Unknown
+unk = unsafeCoerce 0 :: Unknown
 instance Show Thing where
-    show (Thing Type_Int i) = show (unsafeCoerce# i :: Int)
-    show (Thing Type_Type t) = show (unsafeCoerce# t :: Type)
+    show (Thing Type_Int i) = show (unsafeCoerce i :: Int)
+    show (Thing Type_Type t) = show (unsafeCoerce t :: Type)
     show (Thing (Type_Only val) _) = show val
     show (Thing (Type_Func f t) _) = "<unprintable " ++ show (Type_Func f t) ++ ">"
     show (Thing (Type_Group ns) group) = case Map.lookup "^^" ns of
@@ -293,14 +293,14 @@ instance Show Thing where
             [] -> "()"
             (h:t) -> "(" ++ pair h ++ concatMap ((", " ++) . pair) t ++ ")" where
                 pair (name, Method typ method) =
-                    let val = show (Thing typ (unsafeCoerce# method group))
+                    let val = show (Thing typ (unsafeCoerce method group))
                     in case name of
                         ('_':num) | all isDigit num -> val
                         _ -> name ++ "=" ++ val
 instance Eq Thing where
     Thing at av == Thing bt bv = case (at, bt) of
-        (Type_Type, Type_Type) -> (unsafeCoerce# at :: Type) == (unsafeCoerce# bt :: Type)
-        (Type_Int, Type_Int) -> (unsafeCoerce# at :: Int) == (unsafeCoerce# bt :: Int)
+        (Type_Type, Type_Type) -> (unsafeCoerce at :: Type) == (unsafeCoerce bt :: Type)
+        (Type_Int, Type_Int) -> (unsafeCoerce at :: Int) == (unsafeCoerce bt :: Int)
         (Type_Group ans, Type_Group bns) -> ans == bns
         (Type_Only a, Type_Only b) -> a == b
         (Type_Only a, _) -> a == Thing bt bv
@@ -312,7 +312,7 @@ data Method = Method Type (Unknown -> Unknown)
 method_type (Method x _) = x
 method_code (Method _ x) = x
 method_comp (Method typ f) (Method _ g) = Method typ (f . g)
-unkm = unsafeCoerce# 0 :: Unknown -> Unknown
+unkm = unsafeCoerce 0 :: Unknown -> Unknown
 instance Eq Method where Method ta _ == Method tb _ = ta == tb  -- HAAACK
 type Namespace = Map.Map String Method
 data Type = Type_Group Namespace
@@ -347,7 +347,7 @@ convert (Type_Group fromns) (Type_Group tons) = do
         (\(name, Method totype tocode) -> Map.lookup name fromns >>=
             (\(Method fromtype fromcode) -> convert fromtype totype >>= return . (. fromcode)))
         (Map.toList tons)
-    return (\bv -> mapM ($ bv) generators >>= return . unsafeCoerce# . listArray (0, length generators - 1))
+    return (\bv -> mapM ($ bv) generators >>= return . unsafeCoerce . listArray (0, length generators - 1))
 convert a b = if a == b then Just (Just . id) else Nothing
 
 get_method :: String -> Type -> Method
@@ -355,14 +355,14 @@ get_method name (Type_Group ns) = fromJust (Map.lookup name ns)
 
 group_type :: [(String, Type)] -> Type
 group_type members = Type_Group$ Map.fromList$
-    kvmap (\offset (name, typ) -> (name, Method typ (unsafeCoerce# (! offset)))) members
+    kvmap (\offset (name, typ) -> (name, Method typ (unsafeCoerce (! offset)))) members
 
 group_type_map :: (Method -> Method) -> Type -> Type
 group_type_map f (Type_Group ns) = Type_Group$ Map.map f ns
 group_type_add_ctx :: Type -> Type -> Type
 group_type_add_ctx ctxt (Type_Group ns) =
-    Type_Group$ Map.insert "^^" (Method ctxt (unsafeCoerce# fst)) $
-        Map.map (\(Method typ code) -> Method typ (code . unsafeCoerce# snd)) ns
+    Type_Group$ Map.insert "^^" (Method ctxt (unsafeCoerce fst)) $
+        Map.map (\(Method typ code) -> Method typ (code . unsafeCoerce snd)) ns
 
 bindize_members mems = bindize mems 0 where
     bindize :: [AST] -> Int -> [AST]
@@ -376,7 +376,7 @@ ast_compile ctxt (AST_Lit lit@(Thing typ val)) = Method (Type_Only lit) (const u
  -- Call: Calculate type of result, compose code
 ast_compile ctxt (AST_Call f args) = call (ast_compile ctxt f) (ast_compile ctxt args) where
     call (Method (Type_Func from to) f_code) (Method argt args_code) =
-        Method to (sp (unsafeCoerce# f_code) (do_convert argt from . args_code))
+        Method to (sp (unsafeCoerce f_code) (do_convert argt from . args_code))
     call (Method (Type_Only (Thing ft fv)) _) m = call (Method ft (const fv)) m
     call (Method othertype _) _ = error$ "Type error: cannot call non-function type " ++ show othertype
  -- Method: Get type of method in subject ns, compose method with code
@@ -390,7 +390,7 @@ ast_compile ctxt (AST_Method subject name) = case ast_compile ctxt subject of
 ast_compile ctxt (AST_Group mems) = let
     (names, methods) = unzip (map (\(AST_Bind n a) -> (n, ast_compile ctxt a)) (bindize_members mems))
     in Method (group_type (zip names (map method_type methods)))
-        (unsafeCoerce# (\ctx -> listArray (0, length names - 1) (map (($ ctx) . method_code) methods)))
+        (unsafeCoerce (\ctx -> listArray (0, length names - 1) (map (($ ctx) . method_code) methods)))
  -- ID: compile code that calls "^^" on the context until the ID is there
 ast_compile (Type_Group ns) (AST_ID name) = case Map.lookup name ns of
     Just method -> method
@@ -405,7 +405,7 @@ ast_compile ctxt (AST_Lambda pattern body) = let
     (arg_type, pattern_type) = pattern_compile ctxt pattern
     inner_type = group_type_add_ctx ctxt pattern_type
     Method result_type code = ast_compile inner_type body
-    in Method (Type_Func arg_type result_type) (unsafeCoerce# (\ctx arg -> code (unsafeCoerce# (ctx, arg))))
+    in Method (Type_Func arg_type result_type) (unsafeCoerce (\ctx arg -> code (unsafeCoerce (ctx, arg))))
  -- surprisingly simple; just change the type of the context but not the representation 
  --  and let the members refer to the newly created context.
 ast_compile ctxt (AST_Object bindings) = let
@@ -414,7 +414,7 @@ ast_compile ctxt (AST_Object bindings) = let
     in compiled
 ast_compile ctxt (AST_Coerce from typ) = coerce (ast_compile ctxt from) (ast_compile ctxt typ) where
     coerce (Method fromtyp fromcode) (Method (Type_Only (Thing typtyp typval)) _) = case typtyp of
-        Type_Type -> Method (unsafeCoerce# typval) (do_convert fromtyp (unsafeCoerce# typval) . fromcode)
+        Type_Type -> Method (unsafeCoerce typval) (do_convert fromtyp (unsafeCoerce typval) . fromcode)
         Type_Only (Thing typtyp typval) -> coerce (Method typtyp (const typval)) (Method fromtyp fromcode)
         _ -> error$ "Type error: Cannot convert to non-type of type " ++ show typtyp
     coerce (Method fromtyp fromcode) (Method Type_Type _) = error$ "Type error: runtime conversions NYI"
@@ -449,7 +449,7 @@ pattern_compile ctxt (AST_Group members) = let
 
 pattern_compile ctxt (AST_Constraint decl typ) = case decl of
     AST_ID name -> case method_type (ast_compile ctxt typ) of
-        Type_Only (Thing Type_Type typval) -> (unsafeCoerce# typval, Type_Group (Map.singleton name (Method (unsafeCoerce# typval) id)))
+        Type_Only (Thing Type_Type typval) -> (unsafeCoerce typval, Type_Group (Map.singleton name (Method (unsafeCoerce typval) id)))
         _ -> error$ "Pattern error: Runtime types NYI"
     _ -> error$ "Pattern error: Type constraint on non-identifier NYI"
 
@@ -510,7 +510,7 @@ minus :: Array Int Int -> Int
 minus = negate . (! 0)
 
 cm :: Type -> a -> Method
-cm t a = Method (Type_Only (Thing t (unsafeCoerce# a))) id
+cm t a = Method (Type_Only (Thing t (unsafeCoerce a))) id
 
 global_ns :: Namespace
 global_ns = Map.fromList [
