@@ -225,24 +225,23 @@ data AST = AST_Call AST AST  -- func, group
          | AST_Bind String AST
          | AST_Lit Thing
          | AST_ID String
-         | AST_Error ASTE Int Int
          deriving (Show)
 
-data ASTE = AST_Not_A_Name AST deriving (Show)
-
-astize pt@(PT tok chil) = op_trans (td_op (head (token_tds tok))) pt
+astize :: PT -> AST
+astize pt = op_trans (td_op (head (token_tds (pt_token pt)))) pt
 
 astt_id (PT id []) = AST_ID$ token_src id
 astt_id bad = error$ "astt_id called on weird PT: " ++ show bad
 astt_num (PT num []) = AST_Lit (Thing Type_Int (unsafeCoerce# (read (token_src num) :: Int)))
 astt_num bad = error$ "astt_num called on weird PT: " ++ show bad
-astt_bind (PT tok [def, name]) = case astize name of
-    AST_ID new_id -> AST_Bind new_id (astize def)
-    bad -> AST_Error (AST_Not_A_Name bad) (token_line tok) (token_col tok)
+astt_bind (PT tok [rval, lval]) = desugar (astize lval) (astize rval) where
+    desugar (AST_ID name) def = AST_Bind name def
+    desugar (AST_Call f args) def = desugar f (AST_Lambda args def)
+    desugar bad _ = error$ "Cannot bind to " ++ show bad
 astt_bind bad = error$ "astt_bind called on weird PT: " ++ show bad
 astt_method (PT tok [name, subject]) = case astize name of
     AST_ID method -> AST_Method (astize subject) method
-    bad -> AST_Error (AST_Not_A_Name bad) (token_line tok) (token_col tok)
+    bad -> error$ "Right of method call is not a name: " ++ show bad
 astt_group (PT tok chil) = AST_Group$ map astize (reverse chil)
 astt_object (PT tok [child]) = case astize child of
     b@(AST_Bind n v) -> AST_Object [b]
