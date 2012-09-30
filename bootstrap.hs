@@ -43,7 +43,7 @@ data Assoc = ALeft
            | AList
            deriving (Show)
 
-op_FILE = Op ["_FILE"] 0 ANon astt_wrap
+op_FILE = Op ["_FILE"] 0 ANon astt_object
 
 data TP = TP_Str String
         | TP_ID
@@ -244,19 +244,16 @@ astt_method (PT tok [name, subject]) = case astize name of
     AST_ID method -> AST_Method (astize subject) method
     bad -> AST_Error (AST_Not_A_Name bad) (token_line tok) (token_col tok)
 astt_group (PT tok chil) = AST_Group$ map astize (reverse chil)
---astt_object (PT tok chil) = AST_Object$ map astize_binding (reverse chil) where
-  --  astize_binding c = case astize c of
-    --    AST_Bind _ _ -> c
-      --  _ -> error$ "Object may only contain bindings."
+astt_object (PT tok [child]) = case astize child of
+    b@(AST_Bind n v) -> AST_Object [b]
+    AST_Group mems -> AST_Object$ map check_bind mems where
+        check_bind b@(AST_Bind _ _) = b
+        check_bind _ = error$ "Object may only contain bindings."
 astt_func name pt = AST_Call (AST_ID name) (astt_group pt)
 astt_wrap (PT tok [child]) = case astize child of
     bind@(AST_Bind _ _) -> AST_Group [bind]
     other -> other
 astt_wrap bad = error$ "astt_wrap called on weird PT: " ++ show bad
---astt_constraint (PT tok [typ, name]) = case astize name of
---    AST_ID new_id -> AST_constraint (astize typ)
---    bad -> AST_Error (AST_Not_A_Name bad) (token_line tok) (token_col tok)
---astt_constraint bad = error$ "astt_constraint called on weird PT: " ++ show bad
 astt_lambda (PT tok [body, pattern]) = case astize pattern of
     group@(AST_Group _) -> AST_Lambda group (astize body)
     other -> AST_Lambda (AST_Group [other]) (astize body)
@@ -287,15 +284,17 @@ instance Show Thing where
     show (Thing Type_Int i) = show (unsafeCoerce# i :: Int)
     show (Thing Type_Type t) = show (unsafeCoerce# t :: Type)
     show (Thing (Type_Only val) _) = show val
-    show (Thing (Type_Func f t) _) = "<" ++ show (Type_Func f t) ++ ">"
-    show (Thing (Type_Group ns) group) = case Map.toList ns of
-        [] -> "()"
-        (h:t) -> "(" ++ pair h ++ concatMap ((", " ++) . pair) t ++ ")" where
-            pair (name, Method typ method) =
-                let val = show (Thing typ (unsafeCoerce# method group))
-                in case name of
-                    ('_':num) | all isDigit num -> val
-                    _ -> name ++ "=" ++ val
+    show (Thing (Type_Func f t) _) = "<unprintable " ++ show (Type_Func f t) ++ ">"
+    show (Thing (Type_Group ns) group) = case Map.lookup "^^" ns of
+        Just _ -> "<unprintable>"
+        Nothing -> case Map.toList ns of
+            [] -> "()"
+            (h:t) -> "(" ++ pair h ++ concatMap ((", " ++) . pair) t ++ ")" where
+                pair (name, Method typ method) =
+                    let val = show (Thing typ (unsafeCoerce# method group))
+                    in case name of
+                        ('_':num) | all isDigit num -> val
+                        _ -> name ++ "=" ++ val
 instance Eq Thing where
     Thing at av == Thing bt bv = case (at, bt) of
         (Type_Type, Type_Type) -> (unsafeCoerce# at :: Type) == (unsafeCoerce# bt :: Type)
@@ -325,7 +324,9 @@ instance Show Type where
     show Type_Type = "Type"
     show (Type_Only val) = "Only(" ++ show val ++ ")"
     show (Type_Func from to) = "Func(" ++ show from ++ ", " ++ show to ++ ")"
-    show (Type_Group ns) = "(" ++ intercalate ", " (map pair (Map.toList ns)) ++ ")" where
+    show (Type_Group ns) = case Map.lookup "^^" ns of
+        Just _ -> "<unprintable Type>"
+        Nothing -> "(" ++ intercalate ", " (map pair (Map.toList ns)) ++ ")" where
             pair (name, Method typ _) = case name of
                 ('_':num) | all isDigit num -> show typ
                 _ -> name ++ "=" ++ show typ
@@ -366,11 +367,12 @@ ast_compile :: Type -> AST -> Method
  -- Lit: Simply return the thing
 ast_compile ctxt (AST_Lit lit@(Thing typ val)) = Method (Type_Only lit) (const unk)
  -- Call: Calculate type of result, compose code
-ast_compile ctxt (AST_Call f args) = case (ast_compile ctxt f, ast_compile ctxt args) of
-    (Method (Type_Func from to) f_code, Method argt args_code) -> case convert argt from of
+ast_compile ctxt (AST_Call f args) = call (ast_compile ctxt f) (ast_compile ctxt args) where
+    call (Method (Type_Func from to) f_code) (Method argt args_code) = case convert argt from of
         Just conv ->  Method to (sp (unsafeCoerce# f_code) (conv . args_code))
         Nothing -> error$ "Type error: cannot convert " ++ show argt ++ " to " ++ show from
-    (Method othertype _, _) -> error$ "Type error: cannot call non-function type " ++ show othertype
+    call (Method (Type_Only (Thing ft fv)) _) m = call (Method ft (const fv)) m
+    call (Method othertype _) _ = error$ "Type error: cannot call non-function type " ++ show othertype
  -- Method: Get type of method in subject ns, compose method with code
 ast_compile ctxt (AST_Method subject name) = case ast_compile ctxt subject of
     Method (Type_Group ns) code -> case Map.lookup name ns of
@@ -398,11 +400,15 @@ ast_compile ctxt (AST_Lambda pattern body) = let
     inner_type = group_type_add_ctx ctxt pattern_type
     Method result_type code = ast_compile inner_type body
     in Method (Type_Func arg_type result_type) (unsafeCoerce# (\ctx arg -> code (unsafeCoerce# (ctx, arg))))
+ -- surprisingly simple; just change the type of the context but not the representation 
+ --  and let the members refer to the newly created context.
+ast_compile ctxt (AST_Object bindings) = let
+    mems = map (\(AST_Bind n a) -> (n, ast_compile (method_type compiled) a)) bindings
+    compiled = Method (Type_Group (Map.fromList (("^^", Method ctxt id) : mems))) id
+    in compiled
+
 
 ast_compile _ other = error$ "AST error: cannot compile AST by itself: " ++ show other
-
---pattern_compile ctxt (AST_Group members) = let
---    (arg_types, inner_types) = unzip (map pattern_compile members)
 
 
  -- \a=x:Int, b=y:Int -> ...
@@ -454,7 +460,7 @@ global_ops = [
     swop "\\ _ -> _" 3 ANon astt_lambda,
     swop "_ , _" 1 AList astt_group,
     swop "( _ )" 0 ANon astt_wrap,
---    swop "{ _ }" 0 ANon astt_object,
+    swop "{ _ }" 0 ANon astt_object,
     swop "_num" 0 ANon astt_num,
     swop "_id" 0 ANon astt_id]
 
@@ -479,19 +485,19 @@ plus = (! 0)
 minus :: Array Int Int -> Int
 minus = negate . (! 0)
 
-cm :: a -> (Unknown -> Unknown)
-cm = unsafeCoerce# . const
+cm :: Type -> a -> Method
+cm t a = Method (Type_Only (Thing t (unsafeCoerce# a))) id
 
 global_ns :: Namespace
 global_ns = Map.fromList [
-    ("_ ** _", Method func_int_int_int (cm exp0)),
-    ("_ * _", Method func_int_int_int (cm mul)),
-    ("_ + _", Method func_int_int_int (cm add)),
-    ("_ - _", Method func_int_int_int (cm sub)),
-    ("+ _", Method func_int_int (cm plus)),
-    ("- _", Method func_int_int (cm minus)),
-    ("Int", Method (Type_Only (Thing Type_Type (unsafeCoerce# Type_Int))) id),
-    ("Type", Method (Type_Only (Thing Type_Type (unsafeCoerce# Type_Type))) id),
+    ("_ ** _", cm func_int_int_int exp0),
+    ("_ * _", cm func_int_int_int mul),
+    ("_ + _", cm func_int_int_int add),
+    ("_ - _", cm func_int_int_int sub),
+    ("+ _", cm func_int_int plus),
+    ("- _", cm func_int_int minus),
+    ("Int", cm Type_Type Type_Int),
+    ("Type", cm Type_Type Type_Type),
     ("DEFAULT_PARAMETER_TYPE", fromJust$ Map.lookup "Int" global_ns)]
 
  -- Main
@@ -501,7 +507,10 @@ interp src = case tokenize global_op_table src of
     Right toks -> case treeize toks of
         Left err -> Left$ "Treeizer error: " ++ show err
         Right tree -> case ast_compile (Type_Group global_ns) (astize tree) of
-            Method typ m -> Right$ Thing typ (unsafeCoerce# m unk)
+            Method (Type_Group cns) ccode -> case Map.lookup "MAIN" cns of
+                Just (Method mtyp mcode) -> Right$ Thing mtyp (mcode (ccode unk))
+                Nothing -> Left$ "Run error: Program doesn't have a MAIN."
+            _ -> Left$ "Run error: Compilation process didn't return a Type_Group."
 
 main = do
     src <- getContents
