@@ -281,6 +281,8 @@ ast_resolve nses other = other
 
 data Unknown
 data Thing = Thing Type Unknown
+thing_type (Thing x _) = x
+thing_val  (Thing _ x) = x
 unk = unsafeCoerce 0 :: Unknown
 instance Show Thing where
     show (Thing Type_Int i) = show (unsafeCoerce i :: Int)
@@ -377,6 +379,9 @@ ast_compile ctxt (AST_Lit lit@(Thing typ val)) = Method (Type_Only lit) (const u
 ast_compile ctxt (AST_Call f args) = call (ast_compile ctxt f) (ast_compile ctxt args) where
     call (Method (Type_Func from to) f_code) (Method argt args_code) =
         Method to (sp (unsafeCoerce f_code) (do_convert argt from . args_code))
+    call (Method (Type_Only (Thing ft fv)) _) (Method (Type_Only (Thing argt argv)) _) = let
+        Method typ code = call (Method ft (const fv)) (Method argt (const argv))
+        in Method (Type_Only (Thing typ (code unk))) (const unk)
     call (Method (Type_Only (Thing ft fv)) _) m = call (Method ft (const fv)) m
     call (Method othertype _) _ = error$ "Type error: cannot call non-function type " ++ show othertype
  -- Method: Get type of method in subject ns, compose method with code
@@ -389,8 +394,18 @@ ast_compile ctxt (AST_Method subject name) = case ast_compile ctxt subject of
  -- Haskell's laziness will probably show through.
 ast_compile ctxt (AST_Group mems) = let
     (names, methods) = unzip (map (\(AST_Bind n a) -> (n, ast_compile ctxt a)) (bindize_members mems))
-    in Method (group_type (zip names (map method_type methods)))
-        (unsafeCoerce (\ctx -> listArray (0, length names - 1) (map (($ ctx) . method_code) methods)))
+    is_only (Method (Type_Only _) _) = True
+    is_only _ = False
+    only_type (Type_Only t) = thing_type t
+    only_val (Type_Only t) = thing_val t
+    mktype types = group_type (zip names types)
+    mkcode codes = unsafeCoerce (\ctx -> listArray (0, length names - 1) (map ($ ctx) codes))
+    in if all is_only methods
+        then let
+            typ = mktype (map (only_type . method_type) methods)
+            code = mkcode (map (const . only_val . method_type) methods)
+            in Method (Type_Only (Thing typ (code unk))) id
+        else Method (mktype (map method_type methods)) (mkcode (map method_code methods))
  -- ID: compile code that calls "^^" on the context until the ID is there
 ast_compile (Type_Group ns) (AST_ID name) = case Map.lookup name ns of
     Just method -> method
@@ -495,6 +510,7 @@ global_op_table = Map.fromListWith (++)
 
 func_int_int_int = Type_Func (Type_Group$ Map.fromList [("_0", Method Type_Int unkm), ("_1", Method Type_Int unkm)]) Type_Int
 func_int_int = Type_Func (Type_Group$ Map.fromList [("_0", Method Type_Int unkm)]) Type_Int
+exfunct1 f t = Type_Func (Type_Group$ Map.fromList [("_0", Method f unkm)]) t
 
 add :: Array Int Int -> Int
 add x = (x ! 0) + (x ! 1)
@@ -508,6 +524,8 @@ plus :: Array Int Int -> Int
 plus = (! 0)
 minus :: Array Int Int -> Int
 minus = negate . (! 0)
+only :: Array Int Int -> Type
+only = Type_Only . Thing Type_Int . unsafeCoerce . (! 0)
 
 cm :: Type -> a -> Method
 cm t a = Method (Type_Only (Thing t (unsafeCoerce a))) id
@@ -522,6 +540,7 @@ global_ns = Map.fromList [
     ("- _", cm func_int_int minus),
     ("Int", cm Type_Type Type_Int),
     ("Type", cm Type_Type Type_Type),
+    ("Only", cm (exfunct1 Type_Int Type_Type) only),
     ("DEFAULT_PARAMETER_TYPE", fromJust$ Map.lookup "Int" global_ns)]
 
  -- Main
