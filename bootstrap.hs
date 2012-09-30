@@ -220,7 +220,7 @@ data AST = AST_Call AST AST  -- func, group
          | AST_Group [AST]  -- raw or bindings
          | AST_Object [AST]  -- Only bindings allowed
          | AST_Lambda AST AST
---         | AST_Constraint AST AST
+         | AST_Constraint AST AST
          | AST_Method AST String
          | AST_Bind String AST
          | AST_Lit Thing
@@ -265,6 +265,8 @@ astt_call (PT tok [arg, f]) = case astize arg of
     group@(AST_Group _) -> AST_Call (astize f) group
     other -> AST_Call (astize f) (AST_Group [other])
 astt_call bad = error$ "astt_call called on weird PT: " ++ show bad
+astt_constraint (PT tok [decl, typ]) = AST_Constraint (astize decl) (astize typ)
+astt_default_constraint (PT tok [decl]) = AST_Constraint (astize decl) (AST_ID "DEFAULT_PARAMETER_TYPE")
 
 {-
 ast_find_id :: [Namespace] -> String -> AST
@@ -282,8 +284,9 @@ data Unknown
 data Thing = Thing Type Unknown
 unk = unsafeCoerce# 0 :: Unknown
 instance Show Thing where
-    show (Thing (Type_Only val) _) = show val
     show (Thing Type_Int i) = show (unsafeCoerce# i :: Int)
+    show (Thing Type_Type t) = show (unsafeCoerce# t :: Type)
+    show (Thing (Type_Only val) _) = show val
     show (Thing (Type_Func f t) _) = "<" ++ show (Type_Func f t) ++ ">"
     show (Thing (Type_Group ns) group) = case Map.toList ns of
         [] -> "()"
@@ -295,6 +298,7 @@ instance Show Thing where
                     _ -> name ++ "=" ++ val
 instance Eq Thing where
     Thing at av == Thing bt bv = case (at, bt) of
+        (Type_Type, Type_Type) -> (unsafeCoerce# at :: Type) == (unsafeCoerce# bt :: Type)
         (Type_Int, Type_Int) -> (unsafeCoerce# at :: Int) == (unsafeCoerce# bt :: Int)
         (Type_Group ans, Type_Group bns) -> ans == bns
         (Type_Only a, Type_Only b) -> a == b
@@ -314,10 +318,12 @@ data Type = Type_Group Namespace
           | Type_Func Type Type
           | Type_Int
           | Type_Only Thing
+          | Type_Type
           deriving Eq
 instance Show Type where
-    show (Type_Only val) = "Only(" ++ show val ++ ")"
     show Type_Int = "Int"
+    show Type_Type = "Type"
+    show (Type_Only val) = "Only(" ++ show val ++ ")"
     show (Type_Func from to) = "Func(" ++ show from ++ ", " ++ show to ++ ")"
     show (Type_Group ns) = "(" ++ intercalate ", " (map pair (Map.toList ns)) ++ ")" where
             pair (name, Method typ _) = case name of
@@ -414,10 +420,13 @@ pattern_compile ctxt (AST_Group members) = let
     inner_type = Type_Group$ Map.unions (map (\(Type_Group ns) -> ns) mem_types_aug)
     in (arg_type, inner_type)
 
-pattern_compile ctxt (AST_ID name) =
-    (Type_Int,
-     Type_Group (Map.singleton name (Method Type_Int id)))
-pattern_compile _ _ = error$ "Pattern error: Non-trivial pattern not yet supported."
+pattern_compile ctxt (AST_Constraint decl typ) = case decl of
+    AST_ID name -> case method_type (ast_compile ctxt typ) of
+        Type_Only (Thing Type_Type typval) -> (unsafeCoerce# typval, (Type_Group (Map.singleton name (Method (unsafeCoerce# typval) id))))
+        _ -> error$ "Pattern error: Runtime types NYI"
+    _ -> error$ "Pattern error: Type constraint on non-identifier NYI"
+
+pattern_compile _ _ = error$ "Pattern error: something in the pattern is weird or NYI."
 
 
 
@@ -440,7 +449,8 @@ global_ops = [
     swopf "_ - _" 7 ALeft,
 --    swop "_ ?? _ !! _" 6 ARight,
     swop "_ = _" 5 ARight astt_bind,
---    swop "_ :: _" 4 ANon astt_constraint,
+    swop "@ _" 4 ANon astt_default_constraint,
+    swop "_ @ _" 4 ANon astt_constraint,
     swop "\\ _ -> _" 3 ANon astt_lambda,
     swop "_ , _" 1 AList astt_group,
     swop "( _ )" 0 ANon astt_wrap,
@@ -469,10 +479,8 @@ plus = (! 0)
 minus :: Array Int Int -> Int
 minus = negate . (! 0)
 
-ign :: (a -> b) -> (Unknown -> a -> b)
-ign f unk = f
-cm :: (a -> b) -> (Unknown -> Unknown)
-cm = unsafeCoerce# . ign
+cm :: a -> (Unknown -> Unknown)
+cm = unsafeCoerce# . const
 
 global_ns :: Namespace
 global_ns = Map.fromList [
@@ -481,7 +489,10 @@ global_ns = Map.fromList [
     ("_ + _", Method func_int_int_int (cm add)),
     ("_ - _", Method func_int_int_int (cm sub)),
     ("+ _", Method func_int_int (cm plus)),
-    ("- _", Method func_int_int (cm minus))]
+    ("- _", Method func_int_int (cm minus)),
+    ("Int", Method (Type_Only (Thing Type_Type (unsafeCoerce# Type_Int))) id),
+    ("Type", Method (Type_Only (Thing Type_Type (unsafeCoerce# Type_Type))) id),
+    ("DEFAULT_PARAMETER_TYPE", fromJust$ Map.lookup "Int" global_ns)]
 
  -- Main
 
