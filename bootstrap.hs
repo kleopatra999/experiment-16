@@ -221,6 +221,7 @@ data AST = AST_Call AST AST  -- func, group
          | AST_Object [AST]  -- Only bindings allowed
          | AST_Lambda AST AST
          | AST_Constraint AST AST
+         | AST_Coerce AST AST
          | AST_Method AST String
          | AST_Bind String AST
          | AST_Lit Thing
@@ -248,6 +249,7 @@ astt_object (PT tok [child]) = case astize child of
     AST_Group mems -> AST_Object$ map check_bind mems where
         check_bind b@(AST_Bind _ _) = b
         check_bind _ = error$ "Object may only contain bindings."
+    _ -> error$ "Object may only contain bindings."
 astt_func name pt = AST_Call (AST_ID name) (astt_group pt)
 astt_wrap (PT tok [child]) = case astize child of
     bind@(AST_Bind _ _) -> AST_Group [bind]
@@ -263,6 +265,7 @@ astt_call (PT tok [arg, f]) = case astize arg of
 astt_call bad = error$ "astt_call called on weird PT: " ++ show bad
 astt_constraint (PT tok [decl, typ]) = AST_Constraint (astize decl) (astize typ)
 astt_default_constraint (PT tok [decl]) = AST_Constraint (astize decl) (AST_ID "DEFAULT_PARAMETER_TYPE")
+astt_coerce (PT tok [typ, from]) = AST_Coerce (astize from) (astize typ)
 
 {-
 ast_find_id :: [Namespace] -> String -> AST
@@ -330,17 +333,22 @@ instance Show Type where
                 ('_':num) | all isDigit num -> show typ
                 _ -> name ++ "=" ++ show typ
 
-convert :: Type -> Type -> Maybe (Unknown -> Unknown)
+convert :: Type -> Type -> Maybe (Unknown -> Maybe Unknown)
 
-convert (Type_Only (Thing at av)) bt = convert at bt >>= return . const . ($ av)
+convert (Type_Only (Thing at av)) bt = case convert at bt of
+    Nothing -> Nothing
+    Just conv -> case conv av of
+        Nothing -> Nothing
+        Just val -> Just (const (Just val))
+convert at (Type_Only (Thing bt bv)) = Just (\av -> if Thing at av == Thing bt bv then Just unk else Nothing)
  -- Currently this throws away extra positional members; we should fail if there are extras.
 convert (Type_Group fromns) (Type_Group tons) = do
-    generators <- sequence$ map
+    generators <- mapM
         (\(name, Method totype tocode) -> Map.lookup name fromns >>=
             (\(Method fromtype fromcode) -> convert fromtype totype >>= return . (. fromcode)))
         (Map.toList tons)
-    return (\bv -> unsafeCoerce#$ listArray (0, length generators - 1) (map ($ bv) generators))
-convert a b = if a == b then Just id else Nothing
+    return (\bv -> mapM ($ bv) generators >>= return . unsafeCoerce# . listArray (0, length generators - 1))
+convert a b = if a == b then Just (Just . id) else Nothing
 
 get_method :: String -> Type -> Method
 get_method name (Type_Group ns) = fromJust (Map.lookup name ns)
@@ -367,9 +375,8 @@ ast_compile :: Type -> AST -> Method
 ast_compile ctxt (AST_Lit lit@(Thing typ val)) = Method (Type_Only lit) (const unk)
  -- Call: Calculate type of result, compose code
 ast_compile ctxt (AST_Call f args) = call (ast_compile ctxt f) (ast_compile ctxt args) where
-    call (Method (Type_Func from to) f_code) (Method argt args_code) = case convert argt from of
-        Just conv ->  Method to (sp (unsafeCoerce# f_code) (conv . args_code))
-        Nothing -> error$ "Type error: cannot convert " ++ show argt ++ " to " ++ show from
+    call (Method (Type_Func from to) f_code) (Method argt args_code) =
+        Method to (sp (unsafeCoerce# f_code) (do_convert argt from . args_code))
     call (Method (Type_Only (Thing ft fv)) _) m = call (Method ft (const fv)) m
     call (Method othertype _) _ = error$ "Type error: cannot call non-function type " ++ show othertype
  -- Method: Get type of method in subject ns, compose method with code
@@ -405,9 +412,22 @@ ast_compile ctxt (AST_Object bindings) = let
     mems = map (\(AST_Bind n a) -> (n, ast_compile (method_type compiled) a)) bindings
     compiled = Method (Type_Group (Map.fromList (("^^", Method ctxt id) : mems))) id
     in compiled
-
-
+ast_compile ctxt (AST_Coerce from typ) = coerce (ast_compile ctxt from) (ast_compile ctxt typ) where
+    coerce (Method fromtyp fromcode) (Method (Type_Only (Thing typtyp typval)) _) = case typtyp of
+        Type_Type -> Method (unsafeCoerce# typval) (do_convert fromtyp (unsafeCoerce# typval) . fromcode)
+        Type_Only (Thing typtyp typval) -> coerce (Method typtyp (const typval)) (Method fromtyp fromcode)
+        _ -> error$ "Type error: Cannot convert to non-type of type " ++ show typtyp
+    coerce (Method fromtyp fromcode) (Method Type_Type _) = error$ "Type error: runtime conversions NYI"
+    coerce (Method fromtyp fromcode) (Method badtyp typcode) = error$ "Type error: cannot convert to non-type of type " ++ show badtyp
 ast_compile _ other = error$ "AST error: cannot compile AST by itself: " ++ show other
+
+do_convert :: Type -> Type -> (Unknown -> Unknown)
+do_convert from to = case convert from to of
+    Nothing -> error$ "Type error: cannot convert a " ++ show from ++ " to a " ++ show to
+    Just conv -> (\val -> case conv val of
+        Just v -> v
+        Nothing -> error$ "Runtime type error: cannot convert " ++ show (Thing from val) ++ " to a " ++ show to)
+
 
 
  -- \a=x:Int, b=y:Int -> ...
@@ -415,6 +435,8 @@ ast_compile _ other = error$ "AST error: cannot compile AST by itself: " ++ show
  -- inner_type should end up that of (x=ARG.a, y=ARG.b)
  -- types of first binding: (Int, that of (x=ARG.a))
 pattern_bind ctxt (AST_Bind name inner) = (name, pattern_compile ctxt inner)
+
+pattern_compile :: Type -> AST -> (Type, Type)
 pattern_compile ctxt (AST_Group members) = let
     (arg_names, mem_comps) = unzip (map (pattern_bind ctxt) (bindize_members members))
     (arg_types, inner_types) = unzip mem_comps
@@ -427,9 +449,11 @@ pattern_compile ctxt (AST_Group members) = let
 
 pattern_compile ctxt (AST_Constraint decl typ) = case decl of
     AST_ID name -> case method_type (ast_compile ctxt typ) of
-        Type_Only (Thing Type_Type typval) -> (unsafeCoerce# typval, (Type_Group (Map.singleton name (Method (unsafeCoerce# typval) id))))
+        Type_Only (Thing Type_Type typval) -> (unsafeCoerce# typval, Type_Group (Map.singleton name (Method (unsafeCoerce# typval) id)))
         _ -> error$ "Pattern error: Runtime types NYI"
     _ -> error$ "Pattern error: Type constraint on non-identifier NYI"
+
+pattern_compile ctxt (AST_Lit constant) = (Type_Only constant, Type_Group Map.empty)
 
 pattern_compile _ _ = error$ "Pattern error: something in the pattern is weird or NYI."
 
@@ -453,9 +477,10 @@ global_ops = [
     swopf "_ + _" 7 ALeft,
     swopf "_ - _" 7 ALeft,
 --    swop "_ ?? _ !! _" 6 ARight,
-    swop "_ = _" 5 ARight astt_bind,
-    swop "@ _" 4 ANon astt_default_constraint,
-    swop "_ @ _" 4 ANon astt_constraint,
+    swop "_ as _ " 6 ALeft astt_coerce,
+    swop "@ _" 5 ANon astt_default_constraint,
+    swop "_ @ _" 5 ANon astt_constraint,
+    swop "_ = _" 4 ARight astt_bind,
     swop "\\ _ -> _" 3 ANon astt_lambda,
     swop "_ , _" 1 AList astt_group,
     swop "( _ )" 0 ANon astt_wrap,
