@@ -1,58 +1,55 @@
+{-# LANGUAGE FlexibleInstances #-}
 module Ex16.Lexer (
-    LC, TokenParser(..), tp_ics, tp_parse, ws_tp,
-    Lexer(..), build_lexer, lexer_lookup,
-    Token(..), token_lc, token_src, token_def, LexError(..),
-    parse_lex
+    Tokenizer(..), Lexer, empty, null,
+    insert, insertWith, delete, update,
+    lookup_custom, insert_custom, delete_custom, adjust_custom,
 ) where
 
 import qualified Data.Map as M
+import qualified Ex16.Trie as T
+import Prelude hiding (null, lex, read)
+import Control.Monad
+import Debug.Trace
 
-type LC = (Int, Int)
+class Tokenizer c where
+    read :: c t -> String -> Maybe (t, String, String)
 
- -- The lexer looks up tokens by their first character.
-data TokenParser = TPLit String
-                 | TPCustom String (String -> Maybe (String, String))
-tp_ics (TPLit lit) = [head lit]
-tp_ics (TPCustom x _) = x
-tp_parse (TPLit lit) = scan lit where
-    scan [] rest = Just (lit, rest)
-    scan (l:ls) (c:cs) | l == c = scan ls cs
-    scan _ _ = Nothing
-tp_parse (TPCustom _ x) = x
+instance Tokenizer (T.Trie Char) where
+    read = T.read
 
-ws_tp = TPCustom ws span_ws where
-    ws = " \t\n"
-    span_ws str = case span (flip elem ws) str of
-        ([], _) -> Nothing
-        ret -> Just ret
+data Lexer c t = Lexer (T.Trie Char t) [(String, c t)]
+               deriving (Show)
 
- -- TODO: allow adding tokens while parsing
-data Lexer a = Lexer (M.Map Char [(TokenParser, a)])
-build_lexer :: [(TokenParser, a)] -> Lexer a
-build_lexer tokendefs = let
-    with_ics (tp, td) = map (\c -> (c, [(tp, td)])) (tp_ics tp)
-    in Lexer (M.fromListWith (++) (concatMap with_ics tokendefs))
-lexer_lookup c (Lexer map) = M.lookup c map
+empty = Lexer T.empty []
+null (Lexer t []) = T.null t
+null _ = False
 
-data Token a = Token LC String a deriving (Show)
-token_lc (Token x _ _) = x
-token_src (Token _ x _) = x
-token_def (Token _ _ x) = x
-data LexError = LexError LC deriving (Show)
+insert :: String -> t -> Lexer c t -> Lexer c t
+insert name dat (Lexer trie cust) = trace ("insert " ++ name ++ "\n") $ Lexer (T.insert name dat trie) cust
 
-parse_lex :: Lexer a -> String -> Either LexError [Token a]
-parse_lex lexer str = l [] (1, 1) str where
-    l acc lc [] = Right (reverse acc)
-    l acc lc str@(c:_) = case lexer_lookup c lexer of
-        Just bits -> try bits where
-            try [] = Left $ LexError lc
-            try ((tp, bit):bits) = case tp_parse tp str of
-                Just (got, rest) -> let
-                    newlc = scan_lc lc got
-                    in l (Token lc got bit : acc) newlc rest
-                Nothing -> try bits
-        Nothing -> Left $ LexError lc
-    scan_lc (line, col) [] = (line, col)
-    scan_lc (line, col) ('\n':cs) = (succ line, 1)
-    scan_lc (line, col) (_:cs) = (line, succ col)
+insertWith :: (t -> t -> t) -> String -> t -> Lexer c t -> Lexer c t
+insertWith f name dat (Lexer trie cust) = trace ("insertWith " ++ name ++ "\n") $ Lexer (T.insertWith f name dat trie) cust
 
+delete :: String -> Lexer c t -> Lexer c t
+delete name (Lexer trie cust) = Lexer (T.delete name trie) cust
+
+update :: (t -> Maybe t) -> String -> Lexer c t -> Lexer c t
+update f name (Lexer trie cust) = Lexer (T.update f name trie) cust
+
+lookup_custom :: String -> Lexer c t -> Maybe (c t)
+lookup_custom name (Lexer trie cust) = lookup name cust
+
+insert_custom :: String -> c t -> Lexer c t -> Lexer c t
+insert_custom name dat (Lexer trie cust) = Lexer trie ((name, dat) : cust)
+
+delete_custom :: String -> Lexer c t -> Lexer c t
+delete_custom name (Lexer trie cust) = Lexer trie (filter ((/= name) . fst) cust)
+
+adjust_custom :: (c t -> c t) -> String -> Lexer c t -> Lexer c t
+adjust_custom f name (Lexer trie cust) = Lexer trie (map g cust) where
+    g c = if fst c == name then (fst c, f (snd c)) else c
+
+instance Tokenizer c => Tokenizer (Lexer c) where
+    read (Lexer trie cust) str =
+        T.read trie str `mplus`
+        foldl ((. (flip read str) . snd) . mplus) Nothing cust
