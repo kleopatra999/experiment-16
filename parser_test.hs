@@ -41,6 +41,7 @@ parser = foldl (flip (curry4 P.insert)) parser_with_ws [
     ("( _ )", 1.0, P.ANon, "( _ )"),
     ("_ + _", 2.0, P.ALeft, "_ + _"),
     ("_ - _", 2.0, P.ALeft, "_ - _"),
+    ("- _", 4.0, P.ALeft, "- _"),
     ("_ * _", 3.0, P.ALeft, "_ * _"),
     ("_int", 0.0, P.ANon, "_int"),
     ("_ _eof", 1.0/0.0, P.ANon, "_ _eof")
@@ -49,4 +50,4 @@ parser = foldl (flip (curry4 P.insert)) parser_with_ws [
 main = do
     print $ parser_with_tokens
     print $ parser
-    print $ P.parse parser (fromJust (P.lookup "_ _eof" parser)) "(2+3+4*5+(6+7)*8)"
+    print $ P.parse parser (fromJust (P.lookup "_ _eof" parser)) " (2 + -3 + 4*5 + -(6+7) * -8 ) "
