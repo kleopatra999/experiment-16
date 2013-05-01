@@ -4,7 +4,7 @@ module Ex16.Types (
 import Ex16.TypeTypes
 
 tInt :: Class
-tInt = Class (Left 1) [
+tInt = Class 1 [
     ("sign", (tInt, cast (signum::Int->Int))),
     ("abs", (tInt, cast (abs::Int->Int))),
     ]

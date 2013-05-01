@@ -11,21 +11,27 @@ import Data.Unique
 
 data Unknown
 
-type ClassID = Either Int Unique
+type ClassID = Int
 
 type Member = (String, (BoxType, Unknown -> Unknown))
 type Namespace = [Member]
 data Class = Class ClassID Namespace
+instance Show Class where
+    show (Class id ns) = "<Class " ++ showsPrec 11 id ">"
 
 data Dynamic = Dynamic Type Unknown
+instance Show Dynamic where
+    show (Dynamic typ dat) = "<Dynamic " ++ showsPrec 11 typ ">"
 
 data Type = TGroup [BoxType]  -- TODO: named parameters
           | TClass Class
           | TNil
+          deriving (Show)
 
 data BoxType = BTDynamic
              | BTHaskell Type
              | BTConst Dynamic
+             deriving (Show)
 
 type Group = Array Int Unknown
 group_get :: Group -> Int -> Unknown

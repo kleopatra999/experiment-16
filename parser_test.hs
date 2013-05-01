@@ -30,7 +30,7 @@ parser = foldl (flip ($)) (P.empty 0) [
     P.insert_token "_int" int_token (Just (const ())),
     P.insert_token "_ws" ws_token Nothing,
     P.insert_ignore "_ws" 0.0 P.ANon,
-    P.insert "( _ )" 1.0 P.ANon (const "( _ )"),
+    P.insert "( _ )" 0.0 P.ANon (const "( _ )"),
     P.insert "_ + _" 2.0 P.ALeft (const "_ + _"),
     P.insert "_ - _" 2.0 P.ALeft (const "_ - _"),
     P.insert "- _" 4.0 P.ALeft (const "- _"),
