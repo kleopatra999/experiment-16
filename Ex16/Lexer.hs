@@ -25,10 +25,10 @@ null (Lexer t []) = T.null t
 null _ = False
 
 insert :: String -> t -> Lexer c t -> Lexer c t
-insert name dat (Lexer trie cust) = trace ("insert " ++ name ++ "\n") $ Lexer (T.insert name dat trie) cust
+insert name dat (Lexer trie cust) = Lexer (T.insert name dat trie) cust
 
 insertWith :: (t -> t -> t) -> String -> t -> Lexer c t -> Lexer c t
-insertWith f name dat (Lexer trie cust) = trace ("insertWith " ++ name ++ "\n") $ Lexer (T.insertWith f name dat trie) cust
+insertWith f name dat (Lexer trie cust) = Lexer (T.insertWith f name dat trie) cust
 
 delete :: String -> Lexer c t -> Lexer c t
 delete name (Lexer trie cust) = Lexer (T.delete name trie) cust
