@@ -19,12 +19,12 @@ lookup (k:ks) (Trie map _) = case M.lookup k map of
     Just next -> lookup ks next
     Nothing -> Nothing
 
-read :: Ord k => Trie k a -> [k] -> Maybe (a, [k], [k])
-read trie str = f (0::Int) trie str where
-    f i (Trie _ end) [] = fmap (\e -> (e, str, [])) end
+read :: Ord k => Trie k a -> [k] -> Maybe (a, Int)
+read trie str = f 0 trie str where
+    f i (Trie _ end) [] = fmap (\e -> (e, i)) end
     f i (Trie map end) (k:ks) = case M.lookup k map of
         Just next -> f (succ i) next ks
-        Nothing -> fmap (\e -> (e, take i str, k:ks)) end
+        Nothing -> fmap (\e -> (e, i)) end
 
 insert :: Ord k => [k] -> a -> Trie k a -> Trie k a
 insert = insertWith const

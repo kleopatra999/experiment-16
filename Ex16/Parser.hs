@@ -262,22 +262,21 @@ tree_apply parser dat right (left:stack) =
 
  -- PARSING
 
-type Lexer p t o = Parser p t o -> String -> Maybe (Maybe t, [Tok p], String, String)
+type Lexer p t o = Parser p t o -> String -> Maybe (Maybe t, [Tok p], Int)
 
 lex :: Lexer p t o
 lex parser str = lex_lit parser str `mplus` lex_tokens parser str
 
 lex_lit :: Lexer p t o
 lex_lit parser str = do
-    (meanings, got, rest) <- T.read (lits parser) str
-    return (Nothing, meanings, got, rest)
+    (meanings, len) <- T.read (lits parser) str
+    return (Nothing, meanings, len)
 
 lex_tokens :: Lexer p t o
 lex_tokens parser str = let
     lex_token (Token reader tdat, meanings) = do
         len <- reader str
-        let (got, rest) = splitAt len str
-        return (tdat, meanings, got, rest)
+        return (tdat, meanings, len)
     in msum (map lex_token (M.elems (tokens parser))) where
 
 parse :: (ParserData g p t o, Show p, Show o)
@@ -292,10 +291,11 @@ parse parser gdat top_name str = do
     let start = parse' parser gdat (1, 1) str [] where
         parse' parser gdat start str stack = do
              -- Read a single token
-            (tdatish, meanings, got, rest) <-
+            (tdatish, meanings, len) <-
                 require (lex parser str) $ NoTokenMatch start
              -- Do a little processing
-            let end = inc_lc start got
+            let (got, rest) = splitAt len str
+                end = inc_lc start got
                 segment = (start, end)
                 process = \tdat -> [process_token gdat tdat segment got]
                 token_output = maybe [] process tdatish where
