@@ -22,7 +22,7 @@ import Debug.Trace
 
 type LC = (Int, Int)
 type Segment = (LC, LC)
-type Reader = String -> Maybe (String, String)
+type Reader = String -> Maybe Int  -- Just return length parsed
 
  -- Types given to the parser must satisfy this interface.
  --  A g is stored in the parser ('g'lobal).
@@ -275,7 +275,8 @@ lex_lit parser str = do
 lex_tokens :: Lexer p t o
 lex_tokens parser str = let
     lex_token (Token reader tdat, meanings) = do
-        (got, rest) <- reader str
+        len <- reader str
+        let (got, rest) = splitAt len str
         return (tdat, meanings, got, rest)
     in msum (map lex_token (M.elems (tokens parser))) where
 

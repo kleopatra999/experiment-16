@@ -54,19 +54,17 @@ main = run_test $ do
        (Right (Document (Plus (Plus (Literal 1) (Literal 2)) (Literal 3)), []))
        "Unique value generation works"
 
-read_while :: (Char -> Bool) -> String -> Maybe (String, String)
-read_while test = f [] where
-    finish acc s = if null acc then Nothing else Just (reverse acc, s)
-    f acc [] = finish acc []
-    f acc (c:cs) = if test c
-        then f (c:acc) cs
-        else finish acc (c:cs)
+unempty 0 = Nothing
+unempty i = Just i
+
+read_while :: (Char -> Bool) -> String -> Maybe Int
+read_while test = unempty . length . takeWhile test
 
 int_token = read_while isDigit
 ws_token = read_while isSpace
 
-eof_token :: String -> Maybe (String, String)
-eof_token [] = Just ([], [])
+eof_token :: String -> Maybe Int
+eof_token [] = Just 0
 eof_token _ = Nothing
 
 curryL f [a, b] = f a b
