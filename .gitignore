@@ -1,7 +1,5 @@
 
 *.o
 *.hi
-bin
-parser_test
-syntax_test
+*.exe
 
