@@ -288,7 +288,7 @@ parse :: (ParserData g p t o, Show p, Show o)
 parse parser gdat top_name str = do
     top <- require (lookup_pattern top_name parser)
                    (TopNotFound top_name)
-    let start = parse' parser gdat (1, 1) str [] where
+    let start = parse' parser gdat (1, 1) str []
         parse' parser gdat start str stack = do
              -- Read a single token
             (tdatish, meanings, len) <-
