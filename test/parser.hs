@@ -51,7 +51,7 @@ main = run_test $ do
        (Right (Document (Parens (Plus (Plus (Plus (Literal 2) (Negative (Literal 3))) (Times (Literal 4) (Literal 5))) (Times (Negative (Parens (Plus (Literal 6) (Literal 7)))) (Negative (Literal 8))))), []))
        "Parsing arithmetic works"
     is (P.parse parser "_ _eof" "%unique + %unique + %unique")
-       (Right (Document (Plus (Plus (Literal 0) (Literal 1)) (Literal 2)), []))
+       (Right (Document (Plus (Plus (Literal 1) (Literal 2)) (Literal 3)), []))
        "Unique value generation works"
 
 read_while :: (Char -> Bool) -> String -> Maybe (String, String)

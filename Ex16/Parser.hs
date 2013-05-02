@@ -189,6 +189,7 @@ data Error g p t o = NoTokenMatch LC
                    | NoMatch [Error g p t o]
                    | TopNotFound String
                    | CatPatternNYI LC
+                   | InternalError String
                    deriving (Eq, Show)
 
  -- PARSE TREES
@@ -309,7 +310,7 @@ parse parser top_name str = do
             if tree_closed tree && tree_pat tree == top
                 then if List.null stack
                     then return (tree_finish newparser tree, rest)
-                    else error "Internal parser error: had some forgotten stack left over"
+                    else Left $ InternalError "Had some forgotten stack left over"
                 else if tree_closed tree && pattern_ignore (tree_pat tree)
                     then parse' newparser end rest stack
                     else parse' newparser end rest (tree:stack)
