@@ -17,16 +17,16 @@ data Expr = Parens Expr
 instance Show (a -> b) where show _ = "<function>"
 
 instance P.ParserData Int (Maybe ([Expr] -> Expr)) () Expr where
-    mutate_parser curunique Nothing _ _ = P.set_dat (succ curunique)
-    mutate_parser _ _ _ _ = id
+    mutate_parser parser curunique Nothing _ _ = (parser, succ curunique)
+    mutate_parser p c _ _ _ = (p, c)
 
     process_token curunique tdat seg str = Literal (read str)
 
     process_pattern _ (Just trans) _ chil = trans chil
     process_pattern curunique Nothing _ _ = Literal curunique
 
-parser :: P.Parser Int (Maybe ([Expr] -> Expr)) () Expr
-parser = foldl (flip ($)) (P.empty 0) [
+parser :: P.Parser (Maybe ([Expr] -> Expr)) () Expr
+parser = foldl (flip ($)) P.empty [
     P.token "_eof" eof_token Nothing,
     P.token "_int" int_token (Just ()),
     P.token "_ws" ws_token Nothing,
@@ -44,13 +44,13 @@ parser = foldl (flip ($)) (P.empty 0) [
 main = run_test $ do
     plan 3
     diag $ P.dump_parser parser
-    is (P.parse parser "_ _eof" "3")
+    is (P.parse parser 0 "_ _eof" "3")
        (Right (Document (Literal 3), []))
        "Parsing a custom token and one-token pattern works"
-    is (P.parse parser "_ _eof" " (2 + -3 + 4*5 + -(6+7) * -8 ) ")
+    is (P.parse parser 0 "_ _eof" " (2 + -3 + 4*5 + -(6+7) * -8 ) ")
        (Right (Document (Parens (Plus (Plus (Plus (Literal 2) (Negative (Literal 3))) (Times (Literal 4) (Literal 5))) (Times (Negative (Parens (Plus (Literal 6) (Literal 7)))) (Negative (Literal 8))))), []))
        "Parsing arithmetic works"
-    is (P.parse parser "_ _eof" "%unique + %unique + %unique")
+    is (P.parse parser 0 "_ _eof" "%unique + %unique + %unique")
        (Right (Document (Plus (Plus (Literal 1) (Literal 2)) (Literal 3)), []))
        "Unique value generation works"
 

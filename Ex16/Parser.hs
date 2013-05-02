@@ -1,11 +1,11 @@
 {-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, FunctionalDependencies #-}
 module Ex16.Parser (
     LC, Segment, Reader, ParserData(..),
-    Parser, dat, set_dat, empty, null,
+    Parser, empty, null, dump_parser,
     Token, token_dat, token, lookup_token, delete_token,
     Pattern, pattern_id, pattern_name, pattern_prec, pattern_assoc, pattern_dat,
     pattern_ignore, pattern, term, ignore, lookup_pattern, --delete_pattern,
-    Assoc(..), parse, dump_parser
+    Assoc(..), parse
 ) where
 
 import qualified Ex16.Trie as T
@@ -29,14 +29,14 @@ type Reader = String -> Maybe (String, String)
  --  A p is stored in each pattern, unless the pattern is ignored.
  --  A t is stored in each custom token.
  --  An o is produced as the output of parsing
-class ParserData g p t o | g -> p t o where
+class ParserData g p t o | o -> g p t where
      -- After each token, the parser can be modified.
      -- The Int parameter is index of the token in the pattern,
      --  ignoring "_" parts, e.g. in "\ _ -> _", the "\" has an index
      --  of 0 and the -> has an index of 1.
      -- The Maybe t parameter is Nothing if the token is not a custom token
-    mutate_parser :: g -> p -> Maybe t -> Int -> Parser g p t o -> Parser g p t o
-    mutate_parser _ _ _ _ x = x
+    mutate_parser :: Parser p t o -> g -> p -> Maybe t -> Int -> (Parser p t o, g)
+    mutate_parser p d _ _ _ = (p, d)
      -- The String parameter is the exact string matched by the token.
      -- This will only be called on custom tokens.
     process_token :: g -> t -> Segment -> String -> o
@@ -46,33 +46,33 @@ class ParserData g p t o | g -> p t o where
      -- process_pattern will not be called on ignored patterns.
     process_pattern :: g -> p -> Segment -> [o] -> o
 
+no_mutation :: Parser p t o -> g -> p -> Maybe t -> Int -> (Parser p t o, g)
+no_mutation p d _ _ _ = (p, d)
+
  -- PARSER (structure)
-data Parser g p t o = Parser Int
-                             (M.Map String (Pattern p))
-                             (T.Trie Char [Tok p])
-                             (M.Map String (Token t, [Tok p]))
-                             g
+data Parser p t o = Parser Int
+                           (M.Map String (Pattern p))
+                           (T.Trie Char [Tok p])
+                           (M.Map String (Token t, [Tok p]))
                     deriving (Show)
-curid  (Parser x _ _ _ _) = x
-pats   (Parser _ x _ _ _) = x
-lits   (Parser _ _ x _ _) = x
-tokens (Parser _ _ _ x _) = x
-dat    (Parser _ _ _ _ x) = x
-set_curid   a (Parser _ b c d e) = Parser a b c d e
-set_pats    b (Parser a _ c d e) = Parser a b c d e
-set_lits    c (Parser a b _ d e) = Parser a b c d e
-set_tokens  d (Parser a b c _ e) = Parser a b c d e
-set_dat     e (Parser a b c d _) = Parser a b c d e
+curid  (Parser x _ _ _) = x
+pats   (Parser _ x _ _) = x
+lits   (Parser _ _ x _) = x
+tokens (Parser _ _ _ x) = x
+set_curid   a (Parser _ b c d) = Parser a b c d
+set_pats    b (Parser a _ c d) = Parser a b c d
+set_lits    c (Parser a b _ d) = Parser a b c d
+set_tokens  d (Parser a b c _) = Parser a b c d
 
 empty = Parser 0 M.empty T.empty M.empty
 null parser = M.null (pats parser) && M.null (tokens parser)
 
-dump_parser :: (Show g, Show p, Show t) => Parser g p t o -> String
+dump_parser :: (Show p, Show t) => Parser p t o -> String
 dump_parser parser = "tokens: [\n"
                   ++ concatMap (\t -> "\t" ++ dump_token t ++ "\n") (M.assocs (tokens parser))
                   ++ "]\npatterns: [\n"
                   ++ concatMap (\p -> "\t" ++ show p ++ "\n") (M.elems (pats parser))
-                  ++ "]\ndat: " ++ show (dat parser) ++ "\n"
+                  ++ "]\n"
 dump_token (name, (Token _ dat, _)) = show name ++ " " ++ showsPrec 11 dat ""
 
  -- TOKENS
@@ -82,14 +82,14 @@ token_dat    (Token _ x) = x
 instance Show t => Show (Token t) where
     show (Token _ t) = "<Token " ++ showsPrec 11 t ">"
 
-token :: String -> Reader -> Maybe t -> Parser g p t o -> Parser g p t o
-token name reader tdat (Parser curid pats lits tokens gdat) =
-    Parser curid pats lits (M.insert name (Token reader tdat, []) tokens) gdat
+token :: String -> Reader -> Maybe t -> Parser p t o -> Parser p t o
+token name reader tdat parser =
+    set_tokens (M.insert name (Token reader tdat, []) (tokens parser)) parser
 
-lookup_token :: String -> Parser g p t o -> Maybe (Token t)
+lookup_token :: String -> Parser p t o -> Maybe (Token t)
 lookup_token name parser = M.lookup name (tokens parser) >>= return . fst
 
-delete_token :: String -> Parser g p t o -> Parser g p t o
+delete_token :: String -> Parser p t o -> Parser p t o
 delete_token name parser =
     set_tokens (M.delete name (tokens parser)) parser
 
@@ -104,19 +104,19 @@ pattern_dat    (Pattern _ _ _ _ _ x) = x
 data Assoc = ALeft | ARight | AList | ANon deriving (Show, Eq)
 instance Eq (Pattern p) where (==) = (==) `on` pattern_id
 
-pattern :: String -> Double -> Assoc -> p -> Parser g p t o -> Parser g p t o
+pattern :: String -> Double -> Assoc -> p -> Parser p t o -> Parser p t o
 pattern name prec assoc dat = insert_pattern name prec assoc False dat
 
-term :: String -> p -> Parser g p t o -> Parser g p t o
+term :: String -> p -> Parser p t o -> Parser p t o
 term name dat = insert_pattern name 0.0 ANon False dat
 
-ignore :: String -> p -> Parser g p t o -> Parser g p t o
+ignore :: String -> p -> Parser p t o -> Parser p t o
 ignore name dat = insert_pattern name 0.0 ANon True dat
 
-lookup_pattern :: String -> Parser g p t o -> Maybe (Pattern p)
+lookup_pattern :: String -> Parser p t o -> Maybe (Pattern p)
 lookup_pattern name = M.lookup name . pats
 
-insert_pattern :: String -> Double -> Assoc -> Bool -> p -> Parser g p t o -> Parser g p t o
+insert_pattern :: String -> Double -> Assoc -> Bool -> p -> Parser p t o -> Parser p t o
 insert_pattern name prec assoc ignore pdat parser = let
     pat = Pattern (curid parser) name prec assoc ignore pdat
     parts = words name
@@ -144,7 +144,7 @@ insert_pattern name prec assoc ignore pdat parser = let
                 af = const (token, List.insert (tok right) old)
             Nothing -> (T.insertWith (List.insert . head) part [tok right] lits, tokens)
     (_lits, _tokens) = scan Closed 0 parts (lits parser, tokens parser)
-    in Parser (succ (curid parser)) (M.insert name pat (pats parser)) _lits _tokens (dat parser)
+    in Parser (succ (curid parser)) (M.insert name pat (pats parser)) _lits _tokens
 
  -- TOKEN MEANINGS
 data Tok p = Tok (Pattern p) Int Link Link deriving (Show)
@@ -152,8 +152,10 @@ tok_pat    (Tok x _ _ _) = x
 tok_index  (Tok _ x _ _) = x
 tok_left   (Tok _ _ x _) = x
 tok_right  (Tok _ _ _ x) = x
+
 instance Eq (Tok p) where
     a == b = tok_pat a == tok_pat b && tok_index a == tok_index b
+
  -- First prioritize left, then right.
 instance Ord (Tok p) where
     compare = compare `on` \x -> (tok_left x, tok_right x)
@@ -206,19 +208,19 @@ tree_right = tok_right . tree_tok
 tree_ignore = pattern_ignore . tree_pat
 tree_closed = (== Closed) . tree_right
  -- Deliver the payload
-tree_finish :: ParserData g p t o => Parser g p t o -> Tree p o -> o
-tree_finish parser (Tree seg tok chil) =
-    process_pattern (dat parser) (pattern_dat (tok_pat tok)) seg (reverse chil)
+tree_finish :: ParserData g p t o => Parser p t o -> g -> Tree p o -> o
+tree_finish parser dat (Tree seg tok chil) =
+    process_pattern dat (pattern_dat (tok_pat tok)) seg (reverse chil)
  -- Do something with a tree and a stack
  -- The parser must be fed through so that the g -> p owned
  --  by patterns can be executed
 tree_apply :: ParserData g p t o
-           => Parser g p t o -> Tree p o -> [Tree p o]
+           => Parser p t o -> g -> Tree p o -> [Tree p o]
            -> Either (Error g p t o) (Tree p o, [Tree p o])
-tree_apply parser right [] = case tree_left right of
+tree_apply parser dat right [] = case tree_left right of
     Closed -> Right $ (right, [])
     _      -> Left $ BadBeginning (tree_start right) (tree_tok right)
-tree_apply parser right (left:stack) =
+tree_apply parser dat right (left:stack) =
     decide (tree_right left) (tree_left right) where
          -- Decide action based on the token links
         decide _      Closed
@@ -242,11 +244,11 @@ tree_apply parser right (left:stack) =
         merge_left left mid =  -- left adopts middle
             Tree (tree_start left, tree_end mid)
                  (tree_tok left)
-                 (tree_finish parser mid : tree_chil left)
+                 (tree_finish parser dat mid : tree_chil left)
         merge_right mid right =  -- right adopts middle
             Tree (tree_start mid, tree_end right)
                  (tree_tok right)
-                 (tree_chil right ++ [tree_finish parser mid])
+                 (tree_chil right ++ [tree_finish parser dat mid])
         merge_2 left right =  -- left and right join
             Tree (tree_start left, tree_end right)
                  (tree_tok right)
@@ -254,23 +256,23 @@ tree_apply parser right (left:stack) =
         merge_3 left mid right =  -- left and right join and adopt middle
             Tree (tree_start left, tree_end right)
                  (tree_tok right)
-                 (tree_chil right ++ (tree_finish parser mid : tree_chil left))
+                 (tree_chil right ++ (tree_finish parser dat mid : tree_chil left))
         merge_mismatch left right =
             Mismatch (tree_end left, tree_start right) (tree_tok left) (tree_tok right)
 
  -- PARSING
 
-type Lexer g p t o = Parser g p t o -> String -> Maybe (Maybe t, [Tok p], String, String)
+type Lexer p t o = Parser p t o -> String -> Maybe (Maybe t, [Tok p], String, String)
 
-lex :: Lexer g p t o
+lex :: Lexer p t o
 lex parser str = lex_lit parser str `mplus` lex_tokens parser str
 
-lex_lit :: Lexer g p t o
+lex_lit :: Lexer p t o
 lex_lit parser str = do
     (meanings, got, rest) <- T.read (lits parser) str
     return (Nothing, meanings, got, rest)
 
-lex_tokens :: Lexer g p t o
+lex_tokens :: Lexer p t o
 lex_tokens parser str = let
     lex_token (Token reader tdat, meanings) = do
         (got, rest) <- reader str
@@ -278,42 +280,42 @@ lex_tokens parser str = let
     in msum (map lex_token (M.elems (tokens parser))) where
 
 parse :: (ParserData g p t o, Show p, Show o)
-      => Parser g p t o
+      => Parser p t o
+      -> g
       -> String  -- The top-level pattern (e.g. "_ _eof")
       -> String
       -> Either (Error g p t o) (o, String)
-parse parser top_name str = do
+parse parser gdat top_name str = do
     top <- require (lookup_pattern top_name parser)
                    (TopNotFound top_name)
-    let start = parse' parser (1, 1) str [] where
-        parse' parser start str stack = do
+    let start = parse' parser gdat (1, 1) str [] where
+        parse' parser gdat start str stack = do
              -- Read a single token
             (tdatish, meanings, got, rest) <-
                 require (lex parser str) $ NoTokenMatch start
              -- Do a little processing
             let end = inc_lc start got
                 segment = (start, end)
-                process = \tdat -> [process_token (dat parser) tdat segment got]
+                process = \tdat -> [process_token gdat tdat segment got]
                 token_output = maybe [] process tdatish where
              -- Try meanings until one works
-            let try tok = tree_apply parser (Tree segment tok token_output) stack
+            let try tok = tree_apply parser gdat (Tree segment tok token_output) stack
                 tried = map try meanings
                 nomatch [one] = head (lefts [one])
                 nomatch errs = NoMatch (lefts errs)
             (tree, stack) <- alternate tried $ nomatch tried
              -- Mutate parser
-            let gdat = dat parser
-                pdat = pattern_dat (tok_pat (tree_tok tree))
+            let pdat = pattern_dat (tok_pat (tree_tok tree))
                 index = tok_index (tree_tok tree)
-                newparser = mutate_parser gdat pdat tdatish index parser
+                (newparser, newgdat) = mutate_parser parser gdat pdat tdatish index
              -- Finish or recurse
             if tree_closed tree && tree_pat tree == top
                 then if List.null stack
-                    then return (tree_finish newparser tree, rest)
+                    then return (tree_finish newparser newgdat tree, rest)
                     else Left $ InternalError "Had some forgotten stack left over"
                 else if tree_closed tree && pattern_ignore (tree_pat tree)
-                    then parse' newparser end rest stack
-                    else parse' newparser end rest (tree:stack)
+                    then parse' newparser newgdat end rest stack
+                    else parse' newparser newgdat end rest (tree:stack)
     start
 
  -- Various utility functions
