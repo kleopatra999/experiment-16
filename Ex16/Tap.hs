@@ -36,12 +36,12 @@ diag m = Test f where f s = (s, map (" # " ++) (lines m), ())
 
 test_to_string :: Test a -> String
 test_to_string (Test f) = let
-    (_, l, _) = f 0
+    (_, l, _) = f 1
     in unlines l
 
 run_test :: Test a -> IO a
 run_test (Test f) = do
-    let (end, l, r) = f 0
+    let (end, l, r) = f 1
     putStr (unlines l)
     return r
 
