@@ -1,297 +1,330 @@
+{-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, FunctionalDependencies #-}
 module Ex16.Parser (
-    Assoc(..), Pat,
-    Parser, pats, lexer, parser_dat, empty, null, set_dat, insert_token,
-    lookup, insert, insert_ignore, insert_mutator, insert_mutator_ignore, delete,
-    LC, Segment, Tree(..), Error(..), parse
+    LC, Segment, Reader, ParserData(..),
+    Parser, dat, set_dat, empty, null,
+    Token, token_dat, token, lookup_token, delete_token,
+    Pattern, pattern_id, pattern_name, pattern_prec, pattern_assoc, pattern_dat,
+    pattern_ignore, pattern, term, ignore, lookup_pattern, --delete_pattern,
+    Assoc(..), parse, dump_parser
 ) where
 
-import qualified Ex16.Lexer as L
+import qualified Ex16.Trie as T
 import qualified Data.List as List
 import qualified Data.Map as M
-import Prelude hiding (null, lookup)
+import Prelude hiding (null, lookup, lex)
 import Data.Maybe
 import Data.Either
 import Data.Function
 import Control.Monad
 import Debug.Trace
 
-data Assoc = ALeft | ARight | AList | ANon
-           deriving (Show, Eq)
+ -- Utilitous type aliases
 
-type Mutator g p t = Parser g p t -> Parser g p t
+type LC = (Int, Int)
+type Segment = (LC, LC)
+type Reader = String -> Maybe (String, String)
 
- -- A mixfix op composed of tokens and open slots
-data Pat g p t = Pat Int String Double Assoc (Maybe (g -> p))
-pat_id    (Pat x _ _ _ _) = x
-pat_name  (Pat _ x _ _ _) = x
-pat_prec  (Pat _ _ x _ _) = x
-pat_assoc (Pat _ _ _ x _) = x
-pat_dat   (Pat _ _ _ _ x) = x
-pat_ignore = isNothing . pat_dat
-instance Eq (Pat g p t) where (==) = (==) `on` pat_id
-instance Show p => Show (Pat g p t) where
-    show pat = "<Pat " ++ show (pat_name pat) ++ " >"
+ -- Types given to the parser must satisfy this interface.
+ --  A g is stored in the parser ('g'lobal).
+ --  A p is stored in each pattern, unless the pattern is ignored.
+ --  A t is stored in each custom token.
+ --  An o is produced as the output of parsing
+class ParserData g p t o | g -> p t o where
+     -- After each token, the parser can be modified.
+     -- The Int parameter is index of the token in the pattern,
+     --  ignoring "_" parts, e.g. in "\ _ -> _", the "\" has an index
+     --  of 0 and the -> has an index of 1.
+     -- The Maybe t parameter is Nothing if the token is not a custom token
+    mutate_parser :: g -> p -> Maybe t -> Int -> Parser g p t o -> Parser g p t o
+    mutate_parser _ _ _ _ x = x
+     -- The String parameter is the exact string matched by the token.
+     -- This will only be called on custom tokens.
+    process_token :: g -> t -> Segment -> String -> o
+     -- The contents of the list parameter are the processed contents
+     --  of "_" parts and special tokens that return something,
+     -- e.g. in "%macro ( _str , _ = _ )", it will contain three objects.
+     -- process_pattern will not be called on ignored patterns.
+    process_pattern :: g -> p -> Segment -> [o] -> o
 
- -- pats are broken up into these.
-data PP g p t = PP (Pat g p t) Int PPLink PPLink (Mutator g p t) (Maybe (g -> t))
-pp_pat    (PP x _ _ _ _ _) = x
-pp_index  (PP _ x _ _ _ _) = x
-pp_left   (PP _ _ x _ _ _) = x
-pp_right  (PP _ _ _ x _ _) = x
-pp_mutate (PP _ _ _ _ x _) = x
-pp_dat    (PP _ _ _ _ _ x) = x
-instance Eq (PP g p t) where
-    a == b = pp_pat a == pp_pat b && pp_index a == pp_index b
-instance Show (PP g p t) where
-    show pp = "<PP " ++ show (pat_name (pp_pat pp)) ++ " " ++ show (pp_index pp) ++ ">"
+ -- PARSER (structure)
+data Parser g p t o = Parser Int
+                             (M.Map String (Pattern p))
+                             (T.Trie Char [Tok p])
+                             (M.Map String (Token t, [Tok p]))
+                             g
+                    deriving (Show)
+curid  (Parser x _ _ _ _) = x
+pats   (Parser _ x _ _ _) = x
+lits   (Parser _ _ x _ _) = x
+tokens (Parser _ _ _ x _) = x
+dat    (Parser _ _ _ _ x) = x
+set_curid   a (Parser _ b c d e) = Parser a b c d e
+set_pats    b (Parser a _ c d e) = Parser a b c d e
+set_lits    c (Parser a b _ d e) = Parser a b c d e
+set_tokens  d (Parser a b c _ e) = Parser a b c d e
+set_dat     e (Parser a b c d _) = Parser a b c d e
 
- -- The left or right side of a PP, in preference order
-data PPLink = PPLMatch1 | PPLMatch2 | PPLOpen | PPLClosed
-            deriving (Show, Eq, Ord)
+empty = Parser 0 M.empty T.empty M.empty
+null parser = M.null (pats parser) && M.null (tokens parser)
+
+dump_parser :: (Show g, Show p, Show t) => Parser g p t o -> String
+dump_parser parser = "tokens: [\n"
+                  ++ concatMap (\t -> "\t" ++ dump_token t ++ "\n") (M.assocs (tokens parser))
+                  ++ "]\npatterns: [\n"
+                  ++ concatMap (\p -> "\t" ++ show p ++ "\n") (M.elems (pats parser))
+                  ++ "]\ndat: " ++ show (dat parser) ++ "\n"
+dump_token (name, (Token _ dat, _)) = show name ++ " " ++ showsPrec 11 dat ""
+
+ -- TOKENS
+data Token t = Token Reader (Maybe t)
+token_reader (Token x _) = x
+token_dat    (Token _ x) = x
+instance Show t => Show (Token t) where
+    show (Token _ t) = "<Token " ++ showsPrec 11 t ">"
+
+token :: String -> Reader -> Maybe t -> Parser g p t o -> Parser g p t o
+token name reader tdat (Parser curid pats lits tokens gdat) =
+    Parser curid pats lits (M.insert name (Token reader tdat, []) tokens) gdat
+
+lookup_token :: String -> Parser g p t o -> Maybe (Token t)
+lookup_token name parser = M.lookup name (tokens parser) >>= return . fst
+
+delete_token :: String -> Parser g p t o -> Parser g p t o
+delete_token name parser =
+    set_tokens (M.delete name (tokens parser)) parser
+
+ -- PATTERNS
+data Pattern p = Pattern Int String Double Assoc Bool p deriving (Show)
+pattern_id     (Pattern x _ _ _ _ _) = x  -- id is unique within one parser
+pattern_name   (Pattern _ x _ _ _ _) = x
+pattern_prec   (Pattern _ _ x _ _ _) = x
+pattern_assoc  (Pattern _ _ _ x _ _) = x
+pattern_ignore (Pattern _ _ _ _ x _) = x
+pattern_dat    (Pattern _ _ _ _ _ x) = x
+data Assoc = ALeft | ARight | AList | ANon deriving (Show, Eq)
+instance Eq (Pattern p) where (==) = (==) `on` pattern_id
+
+pattern :: String -> Double -> Assoc -> p -> Parser g p t o -> Parser g p t o
+pattern name prec assoc dat = insert_pattern name prec assoc False dat
+
+term :: String -> p -> Parser g p t o -> Parser g p t o
+term name dat = insert_pattern name 0.0 ANon False dat
+
+ignore :: String -> p -> Parser g p t o -> Parser g p t o
+ignore name dat = insert_pattern name 0.0 ANon True dat
+
+lookup_pattern :: String -> Parser g p t o -> Maybe (Pattern p)
+lookup_pattern name = M.lookup name . pats
+
+insert_pattern :: String -> Double -> Assoc -> Bool -> p -> Parser g p t o -> Parser g p t o
+insert_pattern name prec assoc ignore pdat parser = let
+    pat = Pattern (curid parser) name prec assoc ignore pdat
+    parts = words name
+    scan left i parts (lits, tokens) = decide where
+        part = head parts
+        decide = case parts of
+            [] -> error $ "Cannot make an empty pattern"
+            "_":[] -> error $ "Cannot make a pattern of a single _"
+            "_":"_":[] -> error $ "Catpat NYI"
+            "_":"_":_ -> error $ "Too many _s in a row"
+            "_":ps -> openleft
+            p:[] -> closed
+            p:"_":[] -> open
+            _:"_":"_":_ -> error $ "Too many _s in a row"
+            p:"_":ps -> match2
+            p:q:ps -> match1
+        openleft = scan Open i (tail parts) (lits, tokens)
+        closed = one Closed
+        open = one Open
+        match2 = scan Match2 (succ i) (tail (tail parts)) (one Match2)
+        match1 = scan Match1 (succ i) (tail parts) (one Match1)
+        tok right = Tok pat i left right
+        one right = case M.lookup part tokens of
+            Just (token, old) -> (lits, M.adjust af part tokens) where
+                af = const (token, List.insert (tok right) old)
+            Nothing -> (T.insertWith (List.insert . head) part [tok right] lits, tokens)
+    (_lits, _tokens) = scan Closed 0 parts (lits parser, tokens parser)
+    in Parser (succ (curid parser)) (M.insert name pat (pats parser)) _lits _tokens (dat parser)
+
+ -- TOKEN MEANINGS
+data Tok p = Tok (Pattern p) Int Link Link deriving (Show)
+tok_pat    (Tok x _ _ _) = x
+tok_index  (Tok _ x _ _) = x
+tok_left   (Tok _ _ x _) = x
+tok_right  (Tok _ _ _ x) = x
+instance Eq (Tok p) where
+    a == b = tok_pat a == tok_pat b && tok_index a == tok_index b
  -- First prioritize left, then right.
-instance Ord (PP g p t) where
-    compare = compare `on` \x -> (pp_left x, pp_right x)
+instance Ord (Tok p) where
+    compare = compare `on` \x -> (tok_left x, tok_right x)
 
-associate :: PP g p t -> PP g p t -> Assoc
-associate l r = f (pp_right l) (pp_left r) where
-    f PPLOpen PPLMatch2 = ALeft
-    f PPLMatch2 PPLOpen = ARight
-    f PPLOpen PPLOpen = case (compare `on` pat_prec . pp_pat) l r of
+ -- The left or right side of a Tok, in priority order
+data Link = Match1 | Match2 | Open | Closed deriving (Show, Eq, Ord)
+
+ -- Determine which of two non-closed tokens takes precedence
+associate :: Tok p -> Tok p -> Assoc
+associate l r = f (tok_right l) (tok_left r) where
+    f Open Match2 = ALeft
+    f Match2 Open = ARight
+    f Open Open = case (compare `on` pattern_prec . tok_pat) l r of
         GT -> ALeft
         LT -> ARight
-        EQ -> (g `on` pat_assoc . pp_pat) l r where
+        EQ -> (g `on` pattern_assoc . tok_pat) l r where
             g ALeft ALeft = ALeft
             g AList AList = AList
             g ARight ARight = ARight
             g _ _ = ANon
-    f PPLMatch2 PPLMatch2 = match
-    f PPLMatch1 PPLMatch1 = match
+    f Match2 Match2 = match
+    f Match1 Match1 = match
     f _ _ = ANon
-    match = if pp_pat l == pp_pat r && pp_index l + 1 == pp_index r
+    match = if tok_pat l == tok_pat r && tok_index l + 1 == tok_index r
         then AList
         else ANon
 
- -- This mediates between insert_token and the lexer's custom tokens
-data Token g t a = Token (Maybe a) (String -> Maybe (String, String)) (Maybe (g -> t))
-instance L.Tokenizer (Token g t) where
-    read (Token maybe_res reader _) str = do
-        res <- maybe_res
+
+ -- ERRORS
+data Error g p t o = NoTokenMatch LC
+                   | BadBeginning LC (Tok p)
+                   | Mismatch Segment (Tok p) (Tok p)
+                   | NoMatch [Error g p t o]
+                   | TopNotFound String
+                   | CatPatternNYI LC
+                   deriving (Show)
+
+ -- PARSE TREES
+ --  These are temporary and not part of the parser's API
+data Tree p o = Tree Segment (Tok p) [o] deriving (Show)
+tree_segment (Tree x _ _) = x
+tree_tok     (Tree _ x _) = x
+tree_chil    (Tree _ _ x) = x  -- children are stored in reverse order
+tree_start = fst . tree_segment
+tree_end = snd . tree_segment
+tree_pat = tok_pat . tree_tok
+tree_left = tok_left . tree_tok
+tree_right = tok_right . tree_tok
+tree_ignore = pattern_ignore . tree_pat
+tree_closed = (== Closed) . tree_right
+ -- Deliver the payload
+tree_finish :: ParserData g p t o => Parser g p t o -> Tree p o -> o
+tree_finish parser (Tree seg tok chil) =
+    process_pattern (dat parser) (pattern_dat (tok_pat tok)) seg (reverse chil)
+ -- Do something with a tree and a stack
+ -- The parser must be fed through so that the g -> p owned
+ --  by patterns can be executed
+tree_apply :: ParserData g p t o
+           => Parser g p t o -> Tree p o -> [Tree p o]
+           -> Either (Error g p t o) (Tree p o, [Tree p o])
+tree_apply parser right [] = case tree_left right of
+    Closed -> Right $ (right, [])
+    _      -> Left $ BadBeginning (tree_start right) (tree_tok right)
+tree_apply parser right (left:stack) =
+    decide (tree_right left) (tree_left right) where
+         -- Decide action based on the token links
+        decide _      Closed
+                 | tree_ignore right = Right $ (right, left:stack)
+        decide Closed Closed = Left $ CatPatternNYI (tree_start right)
+        decide Closed Open   = reduce left stack
+        decide Closed Match2 = reduce left stack
+        decide Open   Closed = Right $ (right, left:stack)
+        decide Match2 Closed = Right $ (right, left:stack)
+        decide Match1 Match1 = Right $ (merge_2 left right, stack)
+        decide _      _      = Left $ merge_mismatch left right
+        reduce mid [] = case tree_left right of
+            Open   -> Right $ (merge_right mid right, [])
+            _      -> Left $ BadBeginning (tree_start right) (tree_tok right)
+        reduce mid (left:stack) = case associate (tree_tok left) (tree_tok right) of
+            ANon   -> Left $ merge_mismatch left right
+            ALeft  -> reduce (merge_left left mid) stack
+            AList  -> Right $ (merge_3 left mid right, stack)
+            ARight -> Right $ (merge_right mid right, left : stack)
+         -- Actions
+        merge_left left mid =  -- left adopts middle
+            Tree (tree_start left, tree_end mid)
+                 (tree_tok left)
+                 (tree_finish parser mid : tree_chil left)
+        merge_right mid right =  -- right adopts middle
+            Tree (tree_start mid, tree_end right)
+                 (tree_tok right)
+                 (tree_chil right ++ [tree_finish parser mid])
+        merge_2 left right =  -- left and right join
+            Tree (tree_start left, tree_end right)
+                 (tree_tok right)
+                 (tree_chil right ++ tree_chil left)
+        merge_3 left mid right =  -- left and right join and adopt middle
+            Tree (tree_start left, tree_end right)
+                 (tree_tok right)
+                 (tree_chil right ++ (tree_finish parser mid : tree_chil left))
+        merge_mismatch left right =
+            Mismatch (tree_end left, tree_start right) (tree_tok left) (tree_tok right)
+
+ -- PARSING
+
+type Lexer g p t o = Parser g p t o -> String -> Maybe (Maybe t, [Tok p], String, String)
+
+lex :: Lexer g p t o
+lex parser str = lex_lit parser str `mplus` lex_tokens parser str
+
+lex_lit :: Lexer g p t o
+lex_lit parser str = do
+    (meanings, got, rest) <- T.read (lits parser) str
+    return (Nothing, meanings, got, rest)
+
+lex_tokens :: Lexer g p t o
+lex_tokens parser str = let
+    lex_token (Token reader tdat, meanings) = do
         (got, rest) <- reader str
-        return (res, got, rest)
-instance (Show a) => Show (Token g t a) where
-    show (Token adat reader tdat) = "<Token " ++ showsPrec 11 adat ">"
+        return (tdat, meanings, got, rest)
+    in msum (map lex_token (M.elems (tokens parser))) where
 
- -- The actual parser object
-data Parser g p t = Parser Int (M.Map String (Pat g p t)) (L.Lexer (Token g t) [PP g p t]) g
-                  deriving (Show)
+parse :: (ParserData g p t o, Show p, Show o)
+      => Parser g p t o
+      -> String  -- The top-level pattern (e.g. "_ _eof")
+      -> String
+      -> Either (Error g p t o) (o, String)
+parse parser top_name str = do
+    top <- require (lookup_pattern top_name parser)
+                   (TopNotFound top_name)
+    let start = parse' parser (1, 1) str [] where
+        parse' parser start str stack = do
+             -- Read a single token
+            (tdatish, meanings, got, rest) <-
+                require (lex parser str) $ NoTokenMatch start
+             -- Do a little processing
+            let end = inc_lc start got
+                segment = (start, end)
+                process = \tdat -> [process_token (dat parser) tdat segment got]
+                token_output = maybe [] process tdatish where
+             -- Try meanings until one works
+            let try tok = tree_apply parser (Tree segment tok token_output) stack
+                tried = map try meanings
+                nomatch [one] = head (lefts [one])
+                nomatch errs = NoMatch (lefts errs)
+            (tree, stack) <- alternate tried $ nomatch tried
+             -- Mutate parser
+            let gdat = dat parser
+                pdat = pattern_dat (tok_pat (tree_tok tree))
+                index = tok_index (tree_tok tree)
+                newparser = mutate_parser gdat pdat tdatish index parser
+             -- Finish or recurse
+            if tree_closed tree && tree_pat tree == top
+                then if List.null stack
+                    then return (tree_finish newparser tree, rest)
+                    else error "Internal parser error: had some forgotten stack left over"
+                else if tree_closed tree && pattern_ignore (tree_pat tree)
+                    then parse' newparser end rest stack
+                    else parse' newparser end rest (tree:stack)
+    start
 
-pats       (Parser _ x _ _) = x
-lexer      (Parser _ _ x _) = x
-parser_dat (Parser _ _ _ x) = x
+ -- Various utility functions
 
-empty dat = Parser 0 M.empty L.empty dat
-null (Parser _ pats lexer _) = M.null pats && L.null lexer
+ -- Like msum but not treading on anyone's toes
+alternate list err = foldl (flip or) (Left err) list where
+    Right x `or` _ = Right x
+    Left _ `or` x = x
+require Nothing err = Left err
+require (Just x) err = Right x
 
-set_dat dat (Parser curid pats lexer _) = Parser curid pats lexer dat
-
-insert_token :: String -> (String -> Maybe (String, String)) -> Maybe (g -> t) -> Mutator g p t
-insert_token name reader tdat (Parser curid pats lexer gdat) =
-    Parser curid pats (L.insert_custom name (Token Nothing reader tdat) lexer) gdat
-
-lookup :: String -> Parser g p t -> Maybe (Pat g p t)
-lookup name = M.lookup name . pats
-
-insert :: String -> Double -> Assoc -> (g -> p) -> Mutator g p t
-insert name prec assoc dat = insert_internal name prec assoc (const id) (Just dat)
-
-insert_ignore :: String -> Double -> Assoc -> Mutator g p t
-insert_ignore name prec assoc = insert_internal name prec assoc (const id) Nothing
-
-insert_mutator :: String -> Double -> Assoc -> (Int -> Mutator g p t) -> (g -> p) -> Mutator g p t
-insert_mutator name prec assoc f dat = insert_internal name prec assoc f (Just dat)
-
-insert_mutator_ignore :: String -> Double -> Assoc -> (Int -> Mutator g p t) -> Mutator g p t
-insert_mutator_ignore name prec assoc f = insert_internal name prec assoc f Nothing
-
-insert_internal :: String -> Double -> Assoc -> (Int -> Mutator g p t) -> Maybe (g -> p) -> Mutator g p t
-insert_internal name prec assoc mut pdat (Parser curid pats lexer gdat) =
-    guard (Parser (succ curid) (M.insert name pat pats) (scan PPLClosed 0 parts lexer) gdat) where
-        pat = Pat curid name prec assoc pdat
-        parts = words name
-        guard = if isJust pdat || (parts /= [] && head parts /= "_" && last parts /= "_")
-            then id
-            else error "Cannot specify an ignored pattern with an open end"
-        scan left i parts l = let
-            part = head parts
-            pp right = PP pat i left right (mut i)
-            one right = case L.lookup_custom part lexer of
-                Just (Token (Just old) reader tdat) ->
-                    L.adjust_custom (const (Token (Just new) reader tdat)) part l where
-                        new = List.insert (pp right tdat) old
-                Just (Token Nothing reader tdat) ->
-                    L.adjust_custom (const (Token (Just [pp right tdat]) reader tdat)) part l
-                Nothing -> L.insertWith (List.insert . head) part [pp right Nothing] l
-            openleft = scan PPLOpen i (tail parts) l
-            closed = one PPLClosed
-            open = one PPLOpen
-            match2 = scan PPLMatch2 (succ i) (tail (tail parts)) (one PPLMatch2)
-            match1 = scan PPLMatch1 (succ i) (tail parts) (one PPLMatch1)
-            in case parts of
-                [] -> error $ "Cannot make an empty pattern"
-                "_":[] -> error $ "Cannot make a pattern of a single _"
-                "_":"_":[] -> error $ "Catpat NYI"
-                "_":"_":_ -> error $ "Too many _s in a row"
-                "_":ps -> openleft
-                p:[] -> closed
-                p:"_":[] -> open
-                _:"_":"_":_ -> error $ "Too many _s in a row"
-                p:"_":ps -> match2
-                p:q:ps -> match1
-
-delete :: String -> Mutator g p t
-delete name parser@(Parser curid pats lexer gdat) = case lookup name parser of
-    Nothing -> parser
-    Just pat -> let
-        parts = filter (/= "_") (words name)
-        df lexer part = case L.lookup_custom part lexer of
-            Just _ -> L.adjust_custom af part lexer
-            Nothing -> L.delete part lexer
-        af (Token (Just [old]) reader tdat) = Token Nothing reader tdat
-        af (Token (Just old) reader tdat) = Token (Just new) reader tdat where
-            new = List.filter ((pat /=) . pp_pat) old
-        in Parser curid (M.delete name pats) (foldl df lexer parts) gdat
-
- -- Various ways a parse can fail
-data Error g p t = NoTokenMatch LC
-                 | BadBeginning LC (PP g p t)
-                 | Mismatch Segment (PP g p t) (PP g p t)
-                 | NoMatch [Error g p t]
-                 | CatPatNYI LC
-                 deriving (Show)
-
- -- Line and column
-type LC = (Int, Int)
 inc_lc :: LC -> String -> LC
 inc_lc lc [] = lc
 inc_lc (l, c) ('\n':cs) = (succ l, 1)
 inc_lc (l, c) (_:cs) = (l, succ c)
-
-type Segment = (LC, LC)
-
- -- The result of parsing with a Pat
- -- The children are going to be in reverse order (right-to-left)
-data Tree p t = Branch Segment p [Tree p t]
-              | Leaf Segment t String
-instance (Show p, Show t) => Show (Tree p t) where
-    show (Branch seg dat chil) = show dat ++ "[" ++ List.intercalate ", " (map show chil) ++ "]"
-    show (Leaf seg dat src) = show dat ++ " " ++ show src
-
- -- This is a structure internal to the parser, representing an incomplete parse tree
-data PreTree g p t = PreTree Segment (PP g p t) [Tree p t] deriving (Show)
-pt_start (PreTree (x, _) _ _) = x
-pt_end   (PreTree (_, x) _ _) = x
-pt_pp    (PreTree (_, _) x _) = x
-pt_chil  (PreTree (_, _) _ x) = x  -- children are stored in reverse order
-pt_pat = pp_pat . pt_pp
-pt_left = pp_left . pt_pp
-pt_right = pp_right . pt_pp
-pt_ignore = pat_ignore . pp_pat . pt_pp
- -- Do something with a pretree and a stack
- -- The parser must be fed through so that the g -> p owned
- --  by patterns can be executed
-pt_apply :: Parser g p t -> PreTree g p t -> [PreTree g p t]
-         -> Either (Error g p t) (PreTree g p t, [PreTree g p t])
-pt_apply parser right [] = case pt_left right of
-    PPLClosed -> Right $ (right, [])
-    _         -> Left $ merge_badbeginning right
-pt_apply parser right (left:stack) =
-    decide (pt_right left) (pt_left right) where
-         -- Decide action based on the token links
-        decide _         PPLClosed
-                 | pt_ignore right = Right $ (right, left:stack)
-        decide PPLClosed PPLClosed = Left $ CatPatNYI (pt_start right)
-        decide PPLClosed PPLOpen   = reduce left stack
-        decide PPLClosed PPLMatch2 = reduce left stack
-        decide PPLOpen   PPLClosed = Right $ (right, left:stack)
-        decide PPLMatch2 PPLClosed = Right $ (right, left:stack)
-        decide PPLMatch1 PPLMatch1 = Right $ (merge_2 left right, stack)
-        decide _         _         = Left $ merge_mismatch left right
-        reduce mid [] = case pt_left right of
-            PPLOpen -> Right $ (merge_right mid right, [])
-            _       -> Left $ merge_badbeginning right
-        reduce mid (left:stack) = case associate (pt_pp left) (pt_pp right) of
-            ANon    -> Left $ merge_mismatch left right
-            ALeft   -> reduce (merge_left left mid) stack
-            AList   -> Right $ (merge_3 left mid right, stack)
-            ARight  -> Right $ (merge_right mid right, left : stack)
-         -- Actions
-        merge_left left mid =  -- left adopts middle
-            PreTree (pt_start left, pt_end mid)
-                    (pt_pp left)
-                    (pt_finish parser mid : pt_chil left)
-        merge_right mid right =  -- right adopts middle
-            PreTree (pt_start mid, pt_end right)
-                    (pt_pp right)
-                    (pt_chil right ++ [pt_finish parser mid])
-        merge_2 left right =  -- left and right join
-            PreTree (pt_start left, pt_end right)
-                    (pt_pp right)
-                    (pt_chil right ++ pt_chil left)
-        merge_3 left mid right =  -- left and right join and adopt middle
-            PreTree (pt_start left, pt_end right)
-                    (pt_pp right)
-                    (pt_chil right ++ (pt_finish parser mid : pt_chil left))
- -- For converting a PreTree into a Tree
-pt_finish parser (PreTree seg left chil) = case pat_dat (pp_pat left) of
-    Just f -> Branch seg (f (parser_dat parser)) (reverse chil)
-    Nothing -> error $ "Internal parser error: A PreTree that should have been ignored wasn't."
- -- Bad scenarios
-merge_mismatch left right =
-    Mismatch (pt_end left, pt_start right) (pt_pp left) (pt_pp right)
-merge_badbeginning right = BadBeginning (pt_start right) (pt_pp right)
-
-parse :: (Show g, Show p, Show t)
-      => Parser g p t
-      -> Pat g p t
-      -> String
-      -> Either (Error g p t) (Tree p t, String)
-parse parser top str = parse' parser top (1, 1) str [] where
-    parse' :: (Show g, Show p, Show t)
-           => Parser g p t
-           -> Pat g p t
-           -> LC
-           -> String
-           -> [PreTree g p t]
-           -> Either (Error g p t) (Tree p t, String)
-    parse' parser top start str stack = case L.read (lexer parser) str of
-        Nothing -> Left $ NoTokenMatch start
-        Just (meanings, got, rest) -> single (map try meanings) where
-            single results = foldl mplus (Left (NoMatch (lefts results))) results
-            try part = do
-                let end = inc_lc start got
-                    segment = (start, end)
-                    leaf = liftMaybe (flip (Leaf segment) got . ($ parser_dat parser)) (pp_dat part)
-                    preapplied = PreTree segment part leaf
-                (applied, newstack) <- pt_apply parser preapplied stack
-                let newparser = pp_mutate (pt_pp applied) parser
-                    continue = parse' newparser top end rest
-                    closed = pt_right applied == PPLClosed
-                    ignore = closed && pat_ignore (pt_pat applied)
-                    finished = closed && pt_pat applied == top
-                if finished
-                    then if List.null newstack
-                        then return (pt_finish newparser applied, rest)
-                        else error "Internal parser error: had some forgotten stack left over"
-                    else if ignore
-                        then continue newstack
-                        else continue (applied : newstack)
-
- -- Some nice functions for Eithers and stuff, for the parser
-instance MonadPlus (Either a) where
-    mplus (Right x) _ = Right x
-    mplus (Left _) x = x
-    mzero = Left undefined
-
-liftMaybe :: MonadPlus m => (a -> b) -> Maybe a -> m b
-liftMaybe f Nothing = mzero
-liftMaybe f (Just x) = return (f x)
