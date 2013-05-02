@@ -189,7 +189,7 @@ data Error g p t o = NoTokenMatch LC
                    | NoMatch [Error g p t o]
                    | TopNotFound String
                    | CatPatternNYI LC
-                   deriving (Show)
+                   deriving (Eq, Show)
 
  -- PARSE TREES
  --  These are temporary and not part of the parser's API
