@@ -288,7 +288,7 @@ parse parser gdat top_name str = do
                             then do  -- Insert concatenation token
                                 (meanings, len) <- require (T.read (lits parser) "") $ NoCatPat start
                                 (parser, gdat, st1, stack) <- biguate meanings (st1:stack) (fst segment, fst segment)
-                                apply parser gdat (st1:stack)
+                                return (parser, gdat, st0, st1:stack)
                             else case compete (tree_tok st1) (tree_tok st0) of
                                 ALeft -> reduce parser gdat st1 prev stack
                                 ARight -> return (parser, gdat, st0, st1:stack)
