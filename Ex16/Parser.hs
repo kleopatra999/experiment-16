@@ -48,25 +48,27 @@ pp_segment  (ParsedPattern _ x _) = x
 pp_children (ParsedPattern _ _ x) = x
 
  -- PARSER (structure)
-data Parser p t o = Parser Int
-                           (M.Map String (Pattern p))
-                           (T.Trie Char [Tok p])
+data Parser p t o = Parser (T.Trie Char [Tok p])
                            (M.Map String (Token t, [Tok p]))
+                           (M.Map String (Pattern p))
+                           Int
                     deriving (Show)
-curid  (Parser x _ _ _) = x
-pats   (Parser _ x _ _) = x
-lits   (Parser _ _ x _) = x
-tokens (Parser _ _ _ x) = x
-set_curid   a (Parser _ b c d) = Parser a b c d
-set_pats    b (Parser a _ c d) = Parser a b c d
-set_lits    c (Parser a b _ d) = Parser a b c d
-set_tokens  d (Parser a b c _) = Parser a b c d
+lits   (Parser x _ _ _) = x
+tokens (Parser _ x _ _) = x
+pats   (Parser _ _ x _) = x
+curid  (Parser _ _ _ x) = x
+set_lits    a (Parser _ b c d) = Parser a b c d
+set_tokens  b (Parser a _ c d) = Parser a b c d
+set_pats    c (Parser a b _ d) = Parser a b c d
+set_curid   d (Parser a b c _) = Parser a b c d
 
-empty = Parser 0 M.empty T.empty M.empty
-null parser = M.null (pats parser) && M.null (tokens parser)
+empty = Parser T.empty M.empty M.empty 0
+null parser = M.null (tokens parser) && M.null (pats parser)
 
 dump_parser :: (Show p, Show t) => Parser p t o -> String
-dump_parser parser = "tokens: [\n"
+dump_parser parser = "lits: [\n"
+                  ++ concatMap (\(s, l) -> "\t" ++ show s ++ " " ++ show l ++ "\n") (T.assocs (lits parser))
+                  ++ "]\ntokens: [\n"
                   ++ concatMap (\t -> "\t" ++ dump_token t ++ "\n") (M.assocs (tokens parser))
                   ++ "]\npatterns: [\n"
                   ++ concatMap (\p -> "\t" ++ show p ++ "\n") (M.elems (pats parser))
@@ -123,17 +125,18 @@ insert_pattern name prec assoc ignore pdat parser = let
         decide = case parts of
             [] -> error $ "Cannot make an empty pattern"
             "_":[] -> error $ "Cannot make a pattern of a single _"
-            "_":"_":[] -> error $ "Catpat NYI"
-            "_":"_":_ -> error $ "Too many _s in a row"
-            "_":ps -> openleft
-            p:[] -> closed
-            p:"_":[] -> open
-            _:"_":"_":_ -> error $ "Too many _s in a row"
-            p:"_":ps -> match2
-            p:q:ps -> match1
+            "_":"_":_ -> openleft_cat
+            "_":_ -> openleft
+            _:[] -> closed
+            _:"_":[] -> open
+            _:"_":"_":_ -> match2_cat
+            _:"_":_ -> match2
+            _:_:_ -> match1
+        openleft_cat = scan Open i ("" : tail parts) (lits, tokens)
         openleft = scan Open i (tail parts) (lits, tokens)
         closed = one Closed
         open = one Open
+        match2_cat = scan Match2 (succ i) ("" : tail (tail parts)) (one Match2)
         match2 = scan Match2 (succ i) (tail (tail parts)) (one Match2)
         match1 = scan Match1 (succ i) (tail parts) (one Match1)
         tok right = Tok pat i left right
@@ -142,7 +145,7 @@ insert_pattern name prec assoc ignore pdat parser = let
                 af = const (token, List.insert (tok right) old)
             Nothing -> (T.insertWith (List.insert . head) part [tok right] lits, tokens)
     (_lits, _tokens) = scan Closed 0 parts (lits parser, tokens parser)
-    in Parser (succ (curid parser)) (M.insert name pat (pats parser)) _lits _tokens
+    in Parser _lits _tokens (M.insert name pat (pats parser)) (succ (curid parser))
 
  -- TOKEN MEANINGS
 data Tok p = Tok (Pattern p) Int Link Link deriving (Show)
@@ -197,13 +200,15 @@ data Error g p t o = NoTokenMatch LC
                    | Mismatch Segment (Tok p) (Tok p)
                    | NoMatch [Error g p t o]
                    | TopNotFound String
-                   | CatPatternNYI LC
+                   | NoCatPat LC
+                   | InternalStackMiss [Tree p o]
                    | InternalError String
                    deriving (Eq, Show)
 
  -- PARSE TREES
  --  These are temporary and not part of the parser's API
 data Tree p o = Tree Segment (Tok p) [o] deriving (Show)
+instance Eq (Tree p o) where a == b = False  -- Don't actually do this
 tree_segment (Tree x _ _) = x
 tree_tok     (Tree _ x _) = x
 tree_chil    (Tree _ _ x) = x  -- children are stored in reverse order
@@ -237,6 +242,7 @@ lex parser str = lex_lit parser str `mplus` lex_tokens parser str
 lex_lit :: Lexer p t o
 lex_lit parser str = do
     (meanings, len) <- T.read (lits parser) str
+    guard (len > 0)
     return (Nothing, meanings, len)
 
 lex_tokens :: Lexer p t o
@@ -265,20 +271,24 @@ parse parser gdat top_name str = do
             let end = inc_lc start got
             let segment = (start, end)
              -- Try meanings until one works
-            let biguate = alternate tried $ nomatch tried
+            let biguate meanings stack segment = alternate tried $ nomatch tried
+                    where tried = map (try stack) meanings
                 nomatch [one] = head (lefts [one])
                 nomatch errs = NoMatch (lefts errs)
-                tried = map try meanings
-                try tok = apply where
+                try stack tok = apply parser gdat stack where
                     st0 = Tree segment tok []
                      -- Compare tokens 1 apart
-                    apply = case stack of
-                        [] -> if tok_left tok == Closed
-                            then return (parser, gdat, st0, [])
-                            else Left $ BadBeginning start tok
-                        st1:stack -> if tree_ignore st0 && tok_left tok == Closed
-                             -- Ignored patterns are allowed to cheat.
-                            then return (parser, gdat, st0, st1:stack)
+                    apply parser gdat [] = if tok_left tok == Closed
+                        then return (parser, gdat, st0, [])
+                        else Left $ BadBeginning (fst segment) tok
+                    apply parser gdat (st1:stack) = if tree_ignore st0 && tok_left tok == Closed
+                         -- Ignored patterns are allowed to cheat.
+                        then return (parser, gdat, st0, st1:stack)
+                        else if tree_right st1 == Closed && tok_left tok == Closed
+                            then do  -- Insert concatenation token
+                                (meanings, len) <- require (T.read (lits parser) "") $ NoCatPat start
+                                (parser, gdat, st1, stack) <- biguate meanings (st1:stack) (fst segment, fst segment)
+                                apply parser gdat (st1:stack)
                             else case compete (tree_tok st1) (tree_tok st0) of
                                 ALeft -> reduce parser gdat st1 prev stack
                                 ARight -> return (parser, gdat, st0, st1:stack)
@@ -288,7 +298,7 @@ parse parser gdat top_name str = do
                      --  comparing tokens 2 apart
                     reduce parser gdat st1 prev [] = if tok_left tok == Open
                         then return (parser, gdat, merge_right st1 prev st0, [])
-                        else Left $ BadBeginning start tok
+                        else Left $ BadBeginning (fst segment) tok
                     reduce parser gdat st1 prev (st2:stack) =
                         case associate (tree_tok st2) (tree_tok st0) of
                             ALeft  -> do
@@ -300,7 +310,7 @@ parse parser gdat top_name str = do
                             ARight -> return (parser, gdat, merge_right st1 prev st0, st2:stack)
                             AList  -> return (parser, gdat, match2 st2 prev st0, stack)
                             ANon   -> mismatch st1 st0
-            (parser, gdat, st0, stack) <- biguate
+            (parser, gdat, st0, stack) <- biguate meanings stack segment
              -- Mutate parser according to the token read
             (parser, gdat, tokenchild) <- return $
                 process_token parser gdat (tree_to_pt st0 tdat got)
@@ -316,7 +326,7 @@ parse parser gdat top_name str = do
                     if tree_pat st0 == top
                         then if List.null stack
                             then return (next, rest)
-                            else Left $ InternalError "Had some forgotten stack left over"
+                            else Left $ InternalStackMiss stack
                         else if pattern_ignore (tree_pat st0)
                             then parse' parser gdat end rest prev stack
                             else parse' parser gdat end rest next (st0:stack)
@@ -326,7 +336,7 @@ parse parser gdat top_name str = do
  -- Various utility functions
 
  -- Like msum but not treading on anyone's toes
-alternate list err = foldl (flip or) (Left err) list where
+alternate list err = foldl or (Left err) list where
     Right x `or` _ = Right x
     Left _ `or` x = x
 
@@ -335,5 +345,5 @@ require (Just x) err = Right x
 
 inc_lc :: LC -> String -> LC
 inc_lc lc [] = lc
-inc_lc (l, c) ('\n':cs) = (succ l, 1)
-inc_lc (l, c) (_:cs) = (l, succ c)
+inc_lc (l, c) ('\n':cs) = inc_lc (succ l, 1) cs
+inc_lc (l, c) (_:cs) = inc_lc (l, succ c) cs

@@ -45,11 +45,13 @@ parser = foldl (flip ($)) P.empty [
     P.pattern "_ - _" 2.0 P.ALeft (Trans (curryL Minus)),
     P.pattern "- _" 4.0 P.ALeft (Trans (Negative . head)),
     P.pattern "_ * _" 3.0 P.ALeft (Trans (curryL Times)),
-    P.pattern "_ _eof" (-1.0/0.0) P.ANon (Trans (Document . head))
+    P.pattern "_ _eof" (-1.0/0.0) P.ANon (Trans (Document . head)),
+    P.pattern "_ _" 10.0 P.ALeft (Trans (curryL Times)),
+    P.pattern "add _ _" 10.0 P.ALeft (Trans (curryL Plus))
     ]
 
 main = run_test $ do
-    plan 3
+    plan 6
     diag $ P.dump_parser parser
     is (P.parse parser 0 "_ _eof" "3")
        (Right (Document (Literal 3), []))
@@ -60,6 +62,15 @@ main = run_test $ do
     is (P.parse parser 0 "_ _eof" "%unique + %unique + %unique")
        (Right (Document (Plus (Plus (Literal 0) (Literal 1)) (Literal 2)), []))
        "Unique value generation works"
+    is (P.parse parser 0 "_ _eof" "3 4 5 (6) 7")
+       (Right (Document (Times (Times (Times (Times (Literal 3) (Literal 4)) (Literal 5)) (Parens (Literal 6))) (Literal 7)), []))
+       "Concatenation pattern works"
+    is (P.parse parser 0 "_ _eof" "1 2 + 3 4")
+       (Right (Document (Plus (Times (Literal 1) (Literal 2)) (Times (Literal 3) (Literal 4))), []))
+       "Concatenation pattern works with infix"
+    is (P.parse parser 0 "_ _eof" "3 add 4 5 6")
+       (Right (Document (Times (Times (Literal 3) (Plus (Literal 4) (Literal 5))) (Literal 6)), []))
+       "Can disambiguate concatenation"
 
 unempty 0 = Nothing
 unempty i = Just i
