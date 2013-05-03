@@ -272,16 +272,16 @@ parse parser gdat top_name str = do
             let segment = (start, end)
              -- Try meanings until one works
             let biguate meanings stack segment = alternate tried $ nomatch tried
-                    where tried = map (try stack) meanings
+                    where tried = map try meanings
                 nomatch [one] = head (lefts [one])
                 nomatch errs = NoMatch (lefts errs)
-                try stack tok = apply parser gdat stack where
+                try tok = apply stack where
                     st0 = Tree segment tok []
                      -- Compare tokens 1 apart
-                    apply parser gdat [] = if tok_left tok == Closed
+                    apply [] = if tok_left tok == Closed
                         then return (parser, gdat, st0, [])
                         else Left $ BadBeginning (fst segment) tok
-                    apply parser gdat (st1:stack) = if tree_ignore st0 && tok_left tok == Closed
+                    apply (st1:stack) = if tree_ignore st0 && tok_left tok == Closed
                          -- Ignored patterns are allowed to cheat.
                         then return (parser, gdat, st0, st1:stack)
                         else if tree_right st1 == Closed && tok_left tok == Closed
