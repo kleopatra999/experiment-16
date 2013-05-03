@@ -14,31 +14,38 @@ data Expr = Parens Expr
           | Document Expr
           deriving (Eq, Show)
 
+data PatDat = Ignore
+            | Trans ([Expr] -> Expr)
+            | Unique
+            deriving (Show)
+
 instance Show (a -> b) where show _ = "<function>"
 
-instance P.ParserData Int (Maybe ([Expr] -> Expr)) () Expr where
-    mutate_parser parser curunique Nothing _ _ = (parser, succ curunique)
-    mutate_parser p c _ _ _ = (p, c)
+instance P.ParserData Int PatDat () Expr where
 
-    process_token curunique tdat seg str = Literal (read str)
+    process_token parser cu (P.ParsedToken pdat tdat index seg src) =
+        (parser, cu, tdat >> Just (Literal (read src)))
 
-    process_pattern _ (Just trans) _ chil = trans chil
-    process_pattern curunique Nothing _ _ = Literal curunique
+    process_pattern parser cu (P.ParsedPattern pdat seg chil) =
+        case pdat of
+            Ignore -> (parser, cu, Literal (-99))
+            Trans trans -> (parser, cu, trans chil)
+            Unique -> (parser, succ cu, Literal cu)
 
-parser :: P.Parser (Maybe ([Expr] -> Expr)) () Expr
+parser :: P.Parser PatDat () Expr
 parser = foldl (flip ($)) P.empty [
     P.token "_eof" eof_token Nothing,
     P.token "_int" int_token (Just ()),
     P.token "_ws" ws_token Nothing,
-    P.ignore "_ws" (Just undefined),
-    P.term "( _ )" (Just (Parens . head)),
-    P.term "_int" (Just head),
-    P.term "%unique" Nothing,
-    P.pattern "_ + _" 2.0 P.ALeft (Just (curryL Plus)),
-    P.pattern "_ - _" 2.0 P.ALeft (Just (curryL Minus)),
-    P.pattern "- _" 4.0 P.ALeft (Just (Negative . head)),
-    P.pattern "_ * _" 3.0 P.ALeft (Just (curryL Times)),
-    P.pattern "_ _eof" (-1.0/0.0) P.ANon (Just (Document . head))
+    P.ignore "_ws" Ignore,
+    P.term "( _ )" (Trans (Parens . head)),
+    P.term "_int" (Trans head),
+    P.term "%unique" Unique,
+    P.pattern "_ + _" 2.0 P.ALeft (Trans (curryL Plus)),
+    P.pattern "_ - _" 2.0 P.ALeft (Trans (curryL Minus)),
+    P.pattern "- _" 4.0 P.ALeft (Trans (Negative . head)),
+    P.pattern "_ * _" 3.0 P.ALeft (Trans (curryL Times)),
+    P.pattern "_ _eof" (-1.0/0.0) P.ANon (Trans (Document . head))
     ]
 
 main = run_test $ do
@@ -51,7 +58,7 @@ main = run_test $ do
        (Right (Document (Parens (Plus (Plus (Plus (Literal 2) (Negative (Literal 3))) (Times (Literal 4) (Literal 5))) (Times (Negative (Parens (Plus (Literal 6) (Literal 7)))) (Negative (Literal 8))))), []))
        "Parsing arithmetic works"
     is (P.parse parser 0 "_ _eof" "%unique + %unique + %unique")
-       (Right (Document (Plus (Plus (Literal 1) (Literal 2)) (Literal 3)), []))
+       (Right (Document (Plus (Plus (Literal 0) (Literal 1)) (Literal 2)), []))
        "Unique value generation works"
 
 unempty 0 = Nothing
