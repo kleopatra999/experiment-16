@@ -112,12 +112,12 @@ data Error g p t o = NoTokenMatch LC
                    deriving (Eq, Show)
 
  -- PARSE TREE TRANSFORMATIONS
-merge_right l m (ParsedPattern t (_, e) c) = ParsedPattern t (pp_start l, e) (c ++ [m])
-merge_left  (ParsedPattern t (s, _) c) m r = ParsedPattern t (s, pp_end r)   (m : c)
-match1   (ParsedPattern lt (ls, le) lc)   (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (rc ++ lc)
-match2   (ParsedPattern lt (ls, le) lc) m (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (rc ++ m : lc)
+merge_right l m (ParsedPattern t (_, e) c) = ParsedPattern t (pp_start l, e) (m : c)
+merge_left  (ParsedPattern t (s, _) c) m r = ParsedPattern t (s, pp_end r)   (c ++ [m])
+match1   (ParsedPattern lt (ls, le) lc)   (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (lc ++ rc)
+match2   (ParsedPattern lt (ls, le) lc) m (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (lc ++ m : rc)
 mismatch (ParsedPattern lt (ls, le) lc)   (ParsedPattern rt (rs, re) rc) = Left $ Mismatch (le, rs) lt rt
-add_child new (ParsedPattern t seg c) = ParsedPattern t seg (new : c)
+add_child new (ParsedPattern t seg c) = ParsedPattern t seg (c ++ [new])
 
 pp_to_pt (ParsedPattern t seg c) tdat str =
     ParsedToken t tdat (P.index t) seg str
