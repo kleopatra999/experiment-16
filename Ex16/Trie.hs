@@ -1,6 +1,6 @@
 module Ex16.Trie (
     Trie, empty, null,
-    lookup, read, insert, insertWith, delete, update,
+    lookup, read, insert, insertWith, delete, alter,
     assocs, keys, elems
 ) where
 
@@ -42,11 +42,12 @@ delete [] (Trie map end) = Trie map Nothing
 delete (k:ks) (Trie map end) =
     Trie (M.update (nothing_if_empty . delete ks) k map) end
 
-update :: Ord k => (a -> Maybe a) -> [k] -> Trie k a -> Trie k a
-update f [] (Trie map (Just old)) = Trie map (f old)
-update f [] emptyhere = emptyhere
-update f (k:ks) (Trie map end) =
-    Trie (M.update (nothing_if_empty . update f ks) k map) end
+alter :: Ord k => (Maybe a -> Maybe a) -> [k] -> Trie k a -> Trie k a
+alter f [] (Trie map old) = Trie map (f old)
+alter f (k:ks) (Trie map end) =
+    Trie (M.alter af k map) end where
+        af Nothing = f Nothing >>= Just . flip (insert ks) empty
+        af (Just t) = nothing_if_empty (alter f ks t)
 
 nothing_if_empty trie = if null trie then Nothing else Just trie
 

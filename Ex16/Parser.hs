@@ -4,13 +4,14 @@ module Ex16.Parser (
     Parser, empty, null, dump_parser,
     ParsedToken(..), pt_pdat, pt_tdat, pt_index, pt_segment, pt_src, pt_start, pt_end,
     ParsedPattern(..), pp_pdat, pp_segment, pp_children,
-    Token, token_dat, token, lookup_token, delete_token,
+    token,
     Pattern, pattern_id, pattern_name, pattern_prec, pattern_assoc, pattern_dat,
     pattern_ignore, pattern, term, ignore, lookup_pattern, --delete_pattern,
     Assoc(..), parse
 ) where
 
 import qualified Ex16.Trie as T
+import qualified Ex16.Parser.Lexer as L
 import qualified Data.List as List
 import qualified Data.Map as M
 import Prelude hiding (null, lookup, lex)
@@ -48,50 +49,30 @@ pp_segment  (ParsedPattern _ x _) = x
 pp_children (ParsedPattern _ _ x) = x
 
  -- PARSER (structure)
-data Parser p t o = Parser (T.Trie Char [Tok p])
-                           (M.Map String (Token t, [Tok p]))
+data Parser p t o = Parser (L.Lexer t [Tok p])
                            (M.Map String (Pattern p))
                            Int
                     deriving (Show)
-lits   (Parser x _ _ _) = x
-tokens (Parser _ x _ _) = x
-pats   (Parser _ _ x _) = x
-curid  (Parser _ _ _ x) = x
-set_lits    a (Parser _ b c d) = Parser a b c d
-set_tokens  b (Parser a _ c d) = Parser a b c d
-set_pats    c (Parser a b _ d) = Parser a b c d
-set_curid   d (Parser a b c _) = Parser a b c d
+lexer  (Parser x _ _) = x
+pats   (Parser _ x _) = x
+curid  (Parser _ _ x) = x
 
-empty = Parser T.empty M.empty M.empty 0
-null parser = M.null (tokens parser) && M.null (pats parser)
+empty = Parser L.empty M.empty 0
+null parser = L.null (lexer parser) && M.null (pats parser)
 
 dump_parser :: (Show p, Show t) => Parser p t o -> String
 dump_parser parser = "lits: [\n"
-                  ++ concatMap (\(s, l) -> "\t" ++ show s ++ " " ++ show l ++ "\n") (T.assocs (lits parser))
+                  ++ concatMap (\(s, l) -> "\t" ++ show s ++ " " ++ show l ++ "\n") (T.assocs (L.lits (lexer parser)))
                   ++ "]\ntokens: [\n"
-                  ++ concatMap (\t -> "\t" ++ dump_token t ++ "\n") (M.assocs (tokens parser))
+                  ++ concatMap (\t -> "\t" ++ dump_token t ++ "\n") (L.customs (lexer parser))
                   ++ "]\npatterns: [\n"
                   ++ concatMap (\p -> "\t" ++ show p ++ "\n") (M.elems (pats parser))
                   ++ "]\n"
-dump_token (name, (Token _ dat, _)) = show name ++ " " ++ showsPrec 11 dat ""
-
- -- TOKENS
-data Token t = Token Reader (Maybe t)
-token_reader (Token x _) = x
-token_dat    (Token _ x) = x
-instance Show t => Show (Token t) where
-    show (Token _ t) = "<Token " ++ showsPrec 11 t ">"
+dump_token (name, (L.Token _ dat, _)) = show name ++ " " ++ showsPrec 11 dat ""
 
 token :: String -> Reader -> Maybe t -> Parser p t o -> Parser p t o
-token name reader tdat parser =
-    set_tokens (M.insert name (Token reader tdat, []) (tokens parser)) parser
-
-lookup_token :: String -> Parser p t o -> Maybe (Token t)
-lookup_token name parser = M.lookup name (tokens parser) >>= return . fst
-
-delete_token :: String -> Parser p t o -> Parser p t o
-delete_token name parser =
-    set_tokens (M.delete name (tokens parser)) parser
+token name reader tdat (Parser lexer pats curid) =
+    Parser (L.custom name (L.Token reader tdat) [] lexer) pats curid
 
  -- PATTERNS
 data Pattern p = Pattern Int String Double Assoc Bool p deriving (Show)
@@ -120,7 +101,7 @@ insert_pattern :: String -> Double -> Assoc -> Bool -> p -> Parser p t o -> Pars
 insert_pattern name prec assoc ignore pdat parser = let
     pat = Pattern (curid parser) name prec assoc ignore pdat
     parts = words name
-    scan left i parts (lits, tokens) = decide where
+    scan left i parts lexer = decide where
         part = head parts
         decide = case parts of
             [] -> error $ "Cannot make an empty pattern"
@@ -132,20 +113,16 @@ insert_pattern name prec assoc ignore pdat parser = let
             _:"_":"_":_ -> match2_cat
             _:"_":_ -> match2
             _:_:_ -> match1
-        openleft_cat = scan Open i ("" : tail parts) (lits, tokens)
-        openleft = scan Open i (tail parts) (lits, tokens)
+        openleft_cat = scan Open i ("" : tail parts) lexer
+        openleft = scan Open i (tail parts) lexer
         closed = one Closed
         open = one Open
         match2_cat = scan Match2 (succ i) ("" : tail (tail parts)) (one Match2)
         match2 = scan Match2 (succ i) (tail (tail parts)) (one Match2)
         match1 = scan Match1 (succ i) (tail parts) (one Match1)
         tok right = Tok pat i left right
-        one right = case M.lookup part tokens of
-            Just (token, old) -> (lits, M.adjust af part tokens) where
-                af = const (token, List.insert (tok right) old)
-            Nothing -> (T.insertWith (List.insert . head) part [tok right] lits, tokens)
-    (_lits, _tokens) = scan Closed 0 parts (lits parser, tokens parser)
-    in Parser _lits _tokens (M.insert name pat (pats parser)) (succ (curid parser))
+        one right = L.alter ((>>= Just . List.insert (tok right)) . (`mplus` Just [])) part lexer
+    in Parser (scan Closed 0 parts (lexer parser)) (M.insert name pat (pats parser)) (succ (curid parser))
 
  -- TOKEN MEANINGS
 data Tok p = Tok (Pattern p) Int Link Link deriving (Show)
@@ -234,24 +211,6 @@ tree_to_pp (Tree seg t c) =
 
  -- PARSING
 
-type Lexer p t o = Parser p t o -> String -> Maybe (Maybe t, [Tok p], Int)
-
-lex :: Lexer p t o
-lex parser str = lex_lit parser str `mplus` lex_tokens parser str
-
-lex_lit :: Lexer p t o
-lex_lit parser str = do
-    (meanings, len) <- T.read (lits parser) str
-    guard (len > 0)
-    return (Nothing, meanings, len)
-
-lex_tokens :: Lexer p t o
-lex_tokens parser str = let
-    lex_token (Token reader tdat, meanings) = do
-        len <- reader str
-        return (tdat, meanings, len)
-    in msum (map lex_token (M.elems (tokens parser))) where
-
 parse :: (ParserData g p t o, Show p, Show o)
       => Parser p t o
       -> g
@@ -265,7 +224,7 @@ parse parser gdat top_name str = do
         parse' parser gdat start str prev stack = do
              -- Note: prev is only defined if the last pattern was closed.
              -- Read a single token
-            (tdat, meanings, len) <- require (lex parser str) $ NoTokenMatch start
+            (tdat, meanings, len) <- require (L.lex (lexer parser) str) $ NoTokenMatch start
              -- Calculate strings and offsets and stuff
             let (got, rest) = splitAt len str
             let end = inc_lc start got
@@ -286,7 +245,7 @@ parse parser gdat top_name str = do
                         then return (parser, gdat, st0, st1:stack)
                         else if tree_right st1 == Closed && tok_left tok == Closed
                             then do  -- Insert concatenation token
-                                (meanings, len) <- require (T.read (lits parser) "") $ NoCatPat start
+                                (meanings, len) <- require (T.read (L.lits (lexer parser)) "") $ NoCatPat start
                                 (parser, gdat, st1, stack) <- biguate meanings (st1:stack) (fst segment, fst segment)
                                 return (parser, gdat, st0, st1:stack)
                             else case compete (tree_tok st1) (tree_tok st0) of
