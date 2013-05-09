@@ -23,13 +23,13 @@ instance Show (a -> b) where show _ = "<function>"
 
 instance P.ParserData Int PatDat () Expr where
 
-    process_token parser cu (P.ParsedToken pdat tdat index seg src) =
-        (parser, cu, tdat >> Just (Literal (read src)))
+    process_token parser cu pt =
+        (parser, cu, P.pt_tdat pt >> Just (Literal (read (P.pt_src pt))))
 
-    process_pattern parser cu (P.ParsedPattern pdat seg chil) =
-        case pdat of
+    process_pattern parser cu pp =
+        case P.pp_pdat pp of
             Ignore -> (parser, cu, Literal (-99))
-            Trans trans -> (parser, cu, trans chil)
+            Trans trans -> (parser, cu, trans (P.pp_children pp))
             Unique -> (parser, succ cu, Literal cu)
 
 parser :: P.Parser PatDat () Expr

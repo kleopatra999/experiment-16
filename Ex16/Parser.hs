@@ -33,18 +33,26 @@ type Segment = (LC, LC)
 class ParserData g p t o | o -> g p t where
     process_token :: Parser p t o -> g -> ParsedToken p t -> (Parser p t o, g, Maybe o)
     process_pattern :: Parser p t o -> g -> ParsedPattern p o -> (Parser p t o, g, o)
-data ParsedToken p t = ParsedToken p (Maybe t) Int Segment String
-pt_pdat    (ParsedToken x _ _ _ _) = x
+data ParsedToken p t = ParsedToken (P.Morpheme p) (Maybe t) Int Segment String deriving (Eq, Show)
+pt_mo      (ParsedToken x _ _ _ _) = x
 pt_tdat    (ParsedToken _ x _ _ _) = x
 pt_index   (ParsedToken _ _ x _ _) = x
 pt_segment (ParsedToken _ _ _ x _) = x
 pt_src     (ParsedToken _ _ _ _ x) = x
+pt_pdat = P.pdat . P.pattern . pt_mo
 pt_start = fst . pt_segment
 pt_end = snd . pt_segment
-data ParsedPattern p o = ParsedPattern p Segment [o]
-pp_pdat     (ParsedPattern x _ _) = x
+data ParsedPattern p o = ParsedPattern (P.Morpheme p) Segment [o] deriving (Eq, Show)
+pp_mo       (ParsedPattern x _ _) = x
 pp_segment  (ParsedPattern _ x _) = x
 pp_children (ParsedPattern _ _ x) = x
+pp_pat = P.pattern . pp_mo
+pp_left = P.left . pp_mo
+pp_right = P.right . pp_mo
+pp_pdat = P.pdat . pp_pat
+pp_ignore = P.ignore . pp_pat
+pp_start = fst . pp_segment
+pp_end = snd . pp_segment
 
  -- PARSER (structure)
 data Parser p t o = Parser (L.Lexer t [P.Morpheme p])
@@ -99,36 +107,20 @@ data Error g p t o = NoTokenMatch LC
                    | NoMatch [Error g p t o]
                    | TopNotFound String
                    | NoCatPat LC
-                   | InternalStackMiss [Tree p o]
+                   | InternalStackMiss [ParsedPattern p o]
                    | InternalError String
                    deriving (Eq, Show)
 
- -- PARSE TREES
- --  These are temporary and not part of the parser's API
-data Tree p o = Tree Segment (P.Morpheme p) [o] deriving (Show)
-instance Eq (Tree p o) where a == b = False  -- Don't actually do this
-tree_segment (Tree x _ _) = x
-tree_mo      (Tree _ x _) = x
-tree_chil    (Tree _ _ x) = x  -- children are stored in reverse order
-tree_start = fst . tree_segment
-tree_end = snd . tree_segment
-tree_pat = P.pattern . tree_mo
-tree_left = P.left . tree_mo
-tree_right = P.right . tree_mo
-tree_ignore = P.ignore . tree_pat
-tree_closed = (== P.Closed) . tree_right
- -- Tree transformations
-merge_right l m (Tree (_, e) t c) = Tree (tree_start l, e) t (c ++ [m])
-merge_left  (Tree (s, _) t c) m r = Tree (s, tree_end r)   t (m : c)
-match1   (Tree (ls, le) lt lc)   (Tree (rs, re) rt rc) = Tree (ls, re) rt (rc ++ lc)
-match2   (Tree (ls, le) lt lc) m (Tree (rs, re) rt rc) = Tree (ls, re) rt (rc ++ m : lc)
-mismatch (Tree (ls, le) lt lc)   (Tree (rs, re) rt rc) = Left $ Mismatch (le, rs) lt rt
-add_child new (Tree seg t c) = Tree seg t (new : c)
+ -- PARSE TREE TRANSFORMATIONS
+merge_right l m (ParsedPattern t (_, e) c) = ParsedPattern t (pp_start l, e) (c ++ [m])
+merge_left  (ParsedPattern t (s, _) c) m r = ParsedPattern t (s, pp_end r)   (m : c)
+match1   (ParsedPattern lt (ls, le) lc)   (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (rc ++ lc)
+match2   (ParsedPattern lt (ls, le) lc) m (ParsedPattern rt (rs, re) rc) = ParsedPattern rt (ls, re) (rc ++ m : lc)
+mismatch (ParsedPattern lt (ls, le) lc)   (ParsedPattern rt (rs, re) rc) = Left $ Mismatch (le, rs) lt rt
+add_child new (ParsedPattern t seg c) = ParsedPattern t seg (new : c)
 
-tree_to_pt (Tree seg t c) tdat str =
-    ParsedToken (P.pdat (P.pattern t)) tdat (P.index t) seg str
-tree_to_pp (Tree seg t c) =
-    ParsedPattern (P.pdat (P.pattern t)) seg (reverse c)
+pp_to_pt (ParsedPattern t seg c) tdat str =
+    ParsedToken t tdat (P.index t) seg str
 
  -- PARSING
 
@@ -155,37 +147,37 @@ parse parser gdat top_name str = do
                     where tried = map try meanings
                 nomatch [one] = head (lefts [one])
                 nomatch errs = NoMatch (lefts errs)
-                try tok = apply stack where
-                    st0 = Tree segment tok []
+                try mo = apply stack where
+                    st0 = ParsedPattern mo segment []
                      -- Compare tokens 1 apart
-                    apply [] = if P.left tok == P.Closed
+                    apply [] = if P.left mo == P.Closed
                         then return (parser, gdat, st0, [])
-                        else Left $ BadBeginning (fst segment) tok
-                    apply (st1:stack) = if tree_ignore st0 && P.left tok == P.Closed
+                        else Left $ BadBeginning (fst segment) mo
+                    apply (st1:stack) = if pp_ignore st0 && P.left mo == P.Closed
                          -- Ignored patterns are allowed to cheat.
                         then return (parser, gdat, st0, st1:stack)
-                        else if tree_right st1 == P.Closed && P.left tok == P.Closed
+                        else if pp_right st1 == P.Closed && P.left mo == P.Closed
                             then do  -- Insert concatenation token
                                 (meanings, len) <- require (T.read (L.lits (lexer parser)) "") $ NoCatPat start
                                 (parser, gdat, st1, stack) <- biguate meanings (st1:stack) (fst segment, fst segment)
                                 return (parser, gdat, st0, st1:stack)
-                            else case P.compete (tree_mo st1) (tree_mo st0) of
+                            else case P.compete (pp_mo st1) (pp_mo st0) of
                                 P.Left -> reduce parser gdat st1 prev stack
                                 P.Right -> return (parser, gdat, st0, st1:stack)
                                 P.List -> return (parser, gdat, match1 st1 st0, stack)
                                 P.Non -> mismatch st1 st0
                      -- When the left token was closed, we start crawling up the stack,
                      --  comparing tokens 2 apart
-                    reduce parser gdat st1 prev [] = if P.left tok == P.Open
+                    reduce parser gdat st1 prev [] = if P.left mo == P.Open
                         then return (parser, gdat, merge_right st1 prev st0, [])
-                        else Left $ BadBeginning (fst segment) tok
+                        else Left $ BadBeginning (fst segment) mo
                     reduce parser gdat st1 prev (st2:stack) =
-                        case P.associate (tree_mo st2) (tree_mo st0) of
+                        case P.associate (pp_mo st2) (pp_mo st0) of
                             P.Left  -> do
                                 st1 <- return $ merge_left st2 prev st1
                                  -- Mutate parser according to the disputed pattern
                                 (parser, gdat, prev) <- return $
-                                    process_pattern parser gdat (tree_to_pp st1)
+                                    process_pattern parser gdat st1
                                 reduce parser gdat st1 prev stack
                             P.Right -> return (parser, gdat, merge_right st1 prev st0, st2:stack)
                             P.List  -> return (parser, gdat, match2 st2 prev st0, stack)
@@ -193,21 +185,21 @@ parse parser gdat top_name str = do
             (parser, gdat, st0, stack) <- biguate meanings stack segment
              -- Mutate parser according to the token read
             (parser, gdat, tokenchild) <- return $
-                process_token parser gdat (tree_to_pt st0 tdat got)
+                process_token parser gdat (pp_to_pt st0 tdat got)
             st0 <- return $ case tokenchild of
                 Nothing -> st0
                 Just c -> add_child c st0
              -- Finish or recurse
-            if tree_right st0 == P.Closed
+            if pp_right st0 == P.Closed
                 then do
                      -- Mutate according to just-closed pattern
                     (parser, gdat, next) <- return $
-                        process_pattern parser gdat (tree_to_pp st0)
-                    if tree_pat st0 == top
+                        process_pattern parser gdat st0
+                    if pp_pat st0 == top
                         then if List.null stack
                             then return (next, rest)
                             else Left $ InternalStackMiss stack
-                        else if P.ignore (tree_pat st0)
+                        else if pp_ignore st0
                             then parse' parser gdat end rest prev stack
                             else parse' parser gdat end rest next (st0:stack)
                 else parse' parser gdat end rest (error "oops") (st0:stack)
