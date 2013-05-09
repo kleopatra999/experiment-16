@@ -1,4 +1,4 @@
-module Ex16.Trie (
+module Ex16.Parser.Trie (
     Trie, empty, null,
     lookup, read, insert, insertWith, delete, alter,
     assocs, keys, elems

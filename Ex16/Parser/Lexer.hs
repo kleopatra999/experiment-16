@@ -2,7 +2,7 @@ module Ex16.Parser.Lexer (
     Reader, Token(..), Lexer, empty, null, lits, customs, custom, alter, lex
 ) where
 
-import qualified Ex16.Trie as T
+import qualified Ex16.Parser.Trie as T
 import Prelude hiding (lex, null)
 import qualified Data.List as L
 import Control.Monad

@@ -10,7 +10,7 @@ module Ex16.Parser (
     Assoc(..), parse
 ) where
 
-import qualified Ex16.Trie as T
+import qualified Ex16.Parser.Trie as T
 import qualified Ex16.Parser.Lexer as L
 import qualified Data.List as List
 import qualified Data.Map as M
