@@ -41,13 +41,19 @@ parser = foldl (flip ($)) P.empty [
     P.term "( _ )" (Trans (Parens . head)),
     P.term "_int" (Trans head),
     P.term "%unique" Unique,
-    P.pattern "_ + _" 2.0 P.ALeft (Trans (curryL Plus)),
-    P.pattern "_ - _" 2.0 P.ALeft (Trans (curryL Minus)),
-    P.pattern "- _" 4.0 P.ALeft (Trans (Negative . head)),
-    P.pattern "_ * _" 3.0 P.ALeft (Trans (curryL Times)),
-    P.pattern "_ _eof" (-1.0/0.0) P.ANon (Trans (Document . head)),
-    P.pattern "_ _" 10.0 P.ALeft (Trans (curryL Times)),
-    P.pattern "add _ _" 10.0 P.ALeft (Trans (curryL Plus))
+    P.pattern "_ + _" 2.0 P.Left (Trans (curryL Plus)),
+    P.pattern "_ - _" 2.0 P.Left (Trans (curryL Minus)),
+    P.pattern "- _" 4.0 P.Left (Trans (Negative . head)),
+    P.pattern "_ * _" 3.0 P.Left (Trans (curryL Times)),
+    P.pattern "_ _eof" (-1.0/0.0) P.Non (Trans (Document . head)),
+    P.pattern "_ _" 10.0 P.Left (Trans (curryL Times)),
+    P.pattern "add _ _" 10.0 P.Left (Trans (curryL Plus))
+    ]
+
+parser' :: P.Parser PatDat () Expr
+parser' = foldl (flip ($)) P.empty [
+    P.token "_ws" ws_token Nothing,
+    P.ignore "_ws" Ignore
     ]
 
 main = run_test $ do

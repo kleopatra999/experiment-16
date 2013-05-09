@@ -6,6 +6,7 @@ module Ex16.Parser.Trie (
 
 import Prelude hiding (lookup, read, null)
 import qualified Data.Map as M
+import Debug.Trace
 
 data Trie k a = Trie (M.Map k (Trie k a)) (Maybe a)
 
@@ -26,10 +27,10 @@ read trie str = f 0 trie str where
         Just next -> f (succ i) next ks
         Nothing -> fmap (\e -> (e, i)) end
 
-insert :: Ord k => [k] -> a -> Trie k a -> Trie k a
+insert :: Show k => Ord k => [k] -> a -> Trie k a -> Trie k a
 insert = insertWith const
 
-insertWith :: Ord k => (a -> a -> a) -> [k] -> a -> Trie k a -> Trie k a
+insertWith :: Show k => Ord k => (a -> a -> a) -> [k] -> a -> Trie k a -> Trie k a
 insertWith f [] val (Trie map (Just end)) = Trie map (Just (f val end))
 insertWith f [] val (Trie map Nothing) = Trie map (Just val)
 insertWith f (k:ks) val (Trie map end) = let
@@ -42,7 +43,7 @@ delete [] (Trie map end) = Trie map Nothing
 delete (k:ks) (Trie map end) =
     Trie (M.update (nothing_if_empty . delete ks) k map) end
 
-alter :: Ord k => (Maybe a -> Maybe a) -> [k] -> Trie k a -> Trie k a
+alter :: Show k => Ord k => (Maybe a -> Maybe a) -> [k] -> Trie k a -> Trie k a
 alter f [] (Trie map old) = Trie map (f old)
 alter f (k:ks) (Trie map end) =
     Trie (M.alter af k map) end where

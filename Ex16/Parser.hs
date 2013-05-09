@@ -1,17 +1,16 @@
 {-# LANGUAGE MultiParamTypeClasses, FlexibleInstances, FunctionalDependencies #-}
 module Ex16.Parser (
-    LC, Segment, Reader, ParserData(..),
+    LC, Segment, L.Reader, ParserData(..),
     Parser, empty, null, dump_parser,
     ParsedToken(..), pt_pdat, pt_tdat, pt_index, pt_segment, pt_src, pt_start, pt_end,
     ParsedPattern(..), pp_pdat, pp_segment, pp_children,
-    token,
-    Pattern, pattern_id, pattern_name, pattern_prec, pattern_assoc, pattern_dat,
-    pattern_ignore, pattern, term, ignore, lookup_pattern, --delete_pattern,
-    Assoc(..), parse
+    token, pattern, term, ignore, lookup_pattern,
+    P.Assoc(..), parse
 ) where
 
 import qualified Ex16.Parser.Trie as T
 import qualified Ex16.Parser.Lexer as L
+import qualified Ex16.Parser.Patterns as P
 import qualified Data.List as List
 import qualified Data.Map as M
 import Prelude hiding (null, lookup, lex)
@@ -25,7 +24,6 @@ import Debug.Trace
 
 type LC = (Int, Int)
 type Segment = (LC, LC)
-type Reader = String -> Maybe Int  -- Just return length parsed
 
  -- Types given to the parser must satisfy this interface.
  --  A g is stored in the parser ('g'lobal).
@@ -49,8 +47,8 @@ pp_segment  (ParsedPattern _ x _) = x
 pp_children (ParsedPattern _ _ x) = x
 
  -- PARSER (structure)
-data Parser p t o = Parser (L.Lexer t [Tok p])
-                           (M.Map String (Pattern p))
+data Parser p t o = Parser (L.Lexer t [P.Morpheme p])
+                           (M.Map String (P.Pattern p))
                            Int
                     deriving (Show)
 lexer  (Parser x _ _) = x
@@ -70,111 +68,34 @@ dump_parser parser = "lits: [\n"
                   ++ "]\n"
 dump_token (name, (L.Token _ dat, _)) = show name ++ " " ++ showsPrec 11 dat ""
 
-token :: String -> Reader -> Maybe t -> Parser p t o -> Parser p t o
+token :: String -> L.Reader -> Maybe t -> Parser p t o -> Parser p t o
 token name reader tdat (Parser lexer pats curid) =
     Parser (L.custom name (L.Token reader tdat) [] lexer) pats curid
 
  -- PATTERNS
-data Pattern p = Pattern Int String Double Assoc Bool p deriving (Show)
-pattern_id     (Pattern x _ _ _ _ _) = x  -- id is unique within one parser
-pattern_name   (Pattern _ x _ _ _ _) = x
-pattern_prec   (Pattern _ _ x _ _ _) = x
-pattern_assoc  (Pattern _ _ _ x _ _) = x
-pattern_ignore (Pattern _ _ _ _ x _) = x
-pattern_dat    (Pattern _ _ _ _ _ x) = x
-data Assoc = ALeft | ARight | AList | ANon deriving (Show, Eq)
-instance Eq (Pattern p) where (==) = (==) `on` pattern_id
 
-pattern :: String -> Double -> Assoc -> p -> Parser p t o -> Parser p t o
+pattern :: String -> Double -> P.Assoc -> p -> Parser p t o -> Parser p t o
 pattern name prec assoc dat = insert_pattern name prec assoc False dat
 
 term :: String -> p -> Parser p t o -> Parser p t o
-term name dat = insert_pattern name 0.0 ANon False dat
+term name dat = insert_pattern name 0.0 P.Non False dat
 
 ignore :: String -> p -> Parser p t o -> Parser p t o
-ignore name dat = insert_pattern name 0.0 ANon True dat
+ignore name dat = insert_pattern name 0.0 P.Non True dat
 
-lookup_pattern :: String -> Parser p t o -> Maybe (Pattern p)
+lookup_pattern :: String -> Parser p t o -> Maybe (P.Pattern p)
 lookup_pattern name = M.lookup name . pats
 
-insert_pattern :: String -> Double -> Assoc -> Bool -> p -> Parser p t o -> Parser p t o
-insert_pattern name prec assoc ignore pdat parser = let
-    pat = Pattern (curid parser) name prec assoc ignore pdat
-    parts = words name
-    scan left i parts lexer = decide where
-        part = head parts
-        decide = case parts of
-            [] -> error $ "Cannot make an empty pattern"
-            "_":[] -> error $ "Cannot make a pattern of a single _"
-            "_":"_":_ -> openleft_cat
-            "_":_ -> openleft
-            _:[] -> closed
-            _:"_":[] -> open
-            _:"_":"_":_ -> match2_cat
-            _:"_":_ -> match2
-            _:_:_ -> match1
-        openleft_cat = scan Open i ("" : tail parts) lexer
-        openleft = scan Open i (tail parts) lexer
-        closed = one Closed
-        open = one Open
-        match2_cat = scan Match2 (succ i) ("" : tail (tail parts)) (one Match2)
-        match2 = scan Match2 (succ i) (tail (tail parts)) (one Match2)
-        match1 = scan Match1 (succ i) (tail parts) (one Match1)
-        tok right = Tok pat i left right
-        one right = L.alter ((>>= Just . List.insert (tok right)) . (`mplus` Just [])) part lexer
-    in Parser (scan Closed 0 parts (lexer parser)) (M.insert name pat (pats parser)) (succ (curid parser))
-
- -- TOKEN MEANINGS
-data Tok p = Tok (Pattern p) Int Link Link deriving (Show)
-tok_pat    (Tok x _ _ _) = x
-tok_index  (Tok _ x _ _) = x
-tok_left   (Tok _ _ x _) = x
-tok_right  (Tok _ _ _ x) = x
-
-instance Eq (Tok p) where
-    a == b = tok_pat a == tok_pat b && tok_index a == tok_index b
-
- -- First prioritize left, then right.
-instance Ord (Tok p) where
-    compare = compare `on` \x -> (tok_left x, tok_right x)
-
- -- The left or right side of a Tok, in priority order
-data Link = Match1 | Match2 | Open | Closed deriving (Show, Eq, Ord)
-
- -- Which of two concatenated tokens owns the other (or both)
-compete :: Tok p -> Tok p -> Assoc
-compete left right = f (tok_right left) (tok_left right) where
-    f Open Closed = ARight
-    f Match2 Closed = ARight
-    f Closed Open = ALeft
-    f Closed Match2 = ALeft
-    f Match1 Match1 = AList
-    f _ _ = ANon
-
- -- In "left mid right", whether left or right takes the mid (or both)
-associate :: Tok p -> Tok p -> Assoc
-associate l r = f (tok_right l) (tok_left r) where
-    f Open Match2 = ALeft
-    f Match2 Open = ARight
-    f Open Open = case (compare `on` pattern_prec . tok_pat) l r of
-        GT -> ALeft
-        LT -> ARight
-        EQ -> (g `on` pattern_assoc . tok_pat) l r where
-            g ALeft ALeft = ALeft
-            g AList AList = AList
-            g ARight ARight = ARight
-            g _ _ = ANon
-    f Match2 Match2 = match
-    f Match1 Match1 = match
-    f _ _ = ANon
-    match = if tok_pat l == tok_pat r && tok_index l + 1 == tok_index r
-        then AList
-        else ANon
+insert_pattern :: String -> Double -> P.Assoc -> Bool -> p -> Parser p t o -> Parser p t o
+insert_pattern name prec assoc ignore pdat (Parser lexer pats curid) = let
+    pat = P.build curid name prec assoc ignore pdat
+    ins mo lexer = L.alter ((>>= Just . (mo :)) . (`mplus` Just [])) (P.name mo) lexer
+    in Parser (foldl (flip ins) lexer (P.mos pat)) (M.insert name pat pats) (succ curid)
 
  -- ERRORS
 data Error g p t o = NoTokenMatch LC
-                   | BadBeginning LC (Tok p)
-                   | Mismatch Segment (Tok p) (Tok p)
+                   | BadBeginning LC (P.Morpheme p)
+                   | Mismatch Segment (P.Morpheme p) (P.Morpheme p)
                    | NoMatch [Error g p t o]
                    | TopNotFound String
                    | NoCatPat LC
@@ -184,18 +105,18 @@ data Error g p t o = NoTokenMatch LC
 
  -- PARSE TREES
  --  These are temporary and not part of the parser's API
-data Tree p o = Tree Segment (Tok p) [o] deriving (Show)
+data Tree p o = Tree Segment (P.Morpheme p) [o] deriving (Show)
 instance Eq (Tree p o) where a == b = False  -- Don't actually do this
 tree_segment (Tree x _ _) = x
-tree_tok     (Tree _ x _) = x
+tree_mo      (Tree _ x _) = x
 tree_chil    (Tree _ _ x) = x  -- children are stored in reverse order
 tree_start = fst . tree_segment
 tree_end = snd . tree_segment
-tree_pat = tok_pat . tree_tok
-tree_left = tok_left . tree_tok
-tree_right = tok_right . tree_tok
-tree_ignore = pattern_ignore . tree_pat
-tree_closed = (== Closed) . tree_right
+tree_pat = P.pattern . tree_mo
+tree_left = P.left . tree_mo
+tree_right = P.right . tree_mo
+tree_ignore = P.ignore . tree_pat
+tree_closed = (== P.Closed) . tree_right
  -- Tree transformations
 merge_right l m (Tree (_, e) t c) = Tree (tree_start l, e) t (c ++ [m])
 merge_left  (Tree (s, _) t c) m r = Tree (s, tree_end r)   t (m : c)
@@ -205,9 +126,9 @@ mismatch (Tree (ls, le) lt lc)   (Tree (rs, re) rt rc) = Left $ Mismatch (le, rs
 add_child new (Tree seg t c) = Tree seg t (new : c)
 
 tree_to_pt (Tree seg t c) tdat str =
-    ParsedToken (pattern_dat (tok_pat t)) tdat (tok_index t) seg str
+    ParsedToken (P.pdat (P.pattern t)) tdat (P.index t) seg str
 tree_to_pp (Tree seg t c) =
-    ParsedPattern (pattern_dat (tok_pat t)) seg (reverse c)
+    ParsedPattern (P.pdat (P.pattern t)) seg (reverse c)
 
  -- PARSING
 
@@ -237,38 +158,38 @@ parse parser gdat top_name str = do
                 try tok = apply stack where
                     st0 = Tree segment tok []
                      -- Compare tokens 1 apart
-                    apply [] = if tok_left tok == Closed
+                    apply [] = if P.left tok == P.Closed
                         then return (parser, gdat, st0, [])
                         else Left $ BadBeginning (fst segment) tok
-                    apply (st1:stack) = if tree_ignore st0 && tok_left tok == Closed
+                    apply (st1:stack) = if tree_ignore st0 && P.left tok == P.Closed
                          -- Ignored patterns are allowed to cheat.
                         then return (parser, gdat, st0, st1:stack)
-                        else if tree_right st1 == Closed && tok_left tok == Closed
+                        else if tree_right st1 == P.Closed && P.left tok == P.Closed
                             then do  -- Insert concatenation token
                                 (meanings, len) <- require (T.read (L.lits (lexer parser)) "") $ NoCatPat start
                                 (parser, gdat, st1, stack) <- biguate meanings (st1:stack) (fst segment, fst segment)
                                 return (parser, gdat, st0, st1:stack)
-                            else case compete (tree_tok st1) (tree_tok st0) of
-                                ALeft -> reduce parser gdat st1 prev stack
-                                ARight -> return (parser, gdat, st0, st1:stack)
-                                AList -> return (parser, gdat, match1 st1 st0, stack)
-                                ANon -> mismatch st1 st0
+                            else case P.compete (tree_mo st1) (tree_mo st0) of
+                                P.Left -> reduce parser gdat st1 prev stack
+                                P.Right -> return (parser, gdat, st0, st1:stack)
+                                P.List -> return (parser, gdat, match1 st1 st0, stack)
+                                P.Non -> mismatch st1 st0
                      -- When the left token was closed, we start crawling up the stack,
                      --  comparing tokens 2 apart
-                    reduce parser gdat st1 prev [] = if tok_left tok == Open
+                    reduce parser gdat st1 prev [] = if P.left tok == P.Open
                         then return (parser, gdat, merge_right st1 prev st0, [])
                         else Left $ BadBeginning (fst segment) tok
                     reduce parser gdat st1 prev (st2:stack) =
-                        case associate (tree_tok st2) (tree_tok st0) of
-                            ALeft  -> do
+                        case P.associate (tree_mo st2) (tree_mo st0) of
+                            P.Left  -> do
                                 st1 <- return $ merge_left st2 prev st1
                                  -- Mutate parser according to the disputed pattern
                                 (parser, gdat, prev) <- return $
                                     process_pattern parser gdat (tree_to_pp st1)
                                 reduce parser gdat st1 prev stack
-                            ARight -> return (parser, gdat, merge_right st1 prev st0, st2:stack)
-                            AList  -> return (parser, gdat, match2 st2 prev st0, stack)
-                            ANon   -> mismatch st1 st0
+                            P.Right -> return (parser, gdat, merge_right st1 prev st0, st2:stack)
+                            P.List  -> return (parser, gdat, match2 st2 prev st0, stack)
+                            P.Non   -> mismatch st1 st0
             (parser, gdat, st0, stack) <- biguate meanings stack segment
              -- Mutate parser according to the token read
             (parser, gdat, tokenchild) <- return $
@@ -277,7 +198,7 @@ parse parser gdat top_name str = do
                 Nothing -> st0
                 Just c -> add_child c st0
              -- Finish or recurse
-            if tree_right st0 == Closed
+            if tree_right st0 == P.Closed
                 then do
                      -- Mutate according to just-closed pattern
                     (parser, gdat, next) <- return $
@@ -286,7 +207,7 @@ parse parser gdat top_name str = do
                         then if List.null stack
                             then return (next, rest)
                             else Left $ InternalStackMiss stack
-                        else if pattern_ignore (tree_pat st0)
+                        else if P.ignore (tree_pat st0)
                             then parse' parser gdat end rest prev stack
                             else parse' parser gdat end rest next (st0:stack)
                 else parse' parser gdat end rest (error "oops") (st0:stack)

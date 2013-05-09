@@ -6,6 +6,7 @@ import qualified Ex16.Parser.Trie as T
 import Prelude hiding (lex, null)
 import qualified Data.List as L
 import Control.Monad
+import Debug.Trace
 
 type Reader = String -> Maybe Int  -- Just return length parsed
 data Token t = Token Reader (Maybe t)
